@@ -1,5 +1,7 @@
 // RUN: not llvm-mc -triple aarch64-none-linux-gnu < %s 2> %t
 // RUN: FileCheck --check-prefix=CHECK-ERROR --check-prefix=CHECK-ERROR-ARM64 < %t %s
+// RUN: not llvm-mc -triple aarch64-none-linux-gnu -mattr=+sve < %s 2> %t
+// RUN: FileCheck --check-prefix=CHECK-ERROR --check-prefix=CHECK-ERROR-ARM64 < %t %s
 
 //------------------------------------------------------------------------------
 // Add/sub (extended register)
@@ -86,7 +88,7 @@
 // CHECK-ERROR-AARCH64-NEXT: error: expected compatible register, symbol or integer in range [0, 4095]
 // CHECK-ERROR-AARCH64-NEXT:         add w5, w6, #0x1000
 // CHECK-ERROR-AARCH64-NEXT:                     ^
-// CHECK-ERROR-NEXT: error: expected compatible register, symbol or integer in range [0, 4095]
+// CHECK-ERROR: error: expected compatible register, symbol or integer in range [0, 4095]
 // CHECK-ERROR-NEXT:         add w4, w5, #-4096, lsl #12
 // CHECK-ERROR-NEXT:                     ^
 // CHECK-ERROR-NEXT: error: expected compatible register, symbol or integer in range [0, 4095]

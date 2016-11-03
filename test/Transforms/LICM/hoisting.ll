@@ -49,10 +49,45 @@ Out:		; preds = %Loop
 	ret i32 %C
 }
 
+;; It is ok and desirable to hoist this potentially trapping load.
+define i32 @test3(i1 %c, i32* noalias %ptr) {
+; CHECK-LABEL: @test3(
+; CHECK: %A = load i32, i32* %ptr
+; CHECK: %B = load i32, i32* %ptr
+; CHECK: Loop:
+	%A = load i32, i32* %ptr  ; <i32> [#uses=2]
+	br label %Loop
+Loop:
+        ;; Should have hoisted this load!
+	%B = load i32, i32* %ptr
+	call void @foo2( i32 %B )
+	br i1 %c, label %Loop, label %Out
+Out:		; preds = %Loop
+	%C = sub i32 %A, %B		; <i32> [#uses=1]
+	ret i32 %C
+}
+
+;; Negative test:
+;; It is not ok to hoist this load, as it may alias with a possibly write in foo2
+define i32 @test3neg(i1 %c, i32* %ptr) {
+; CHECK-LABEL: @test3neg(
+; CHECK: %A = load i32, i32* %ptr
+; CHECK: Loop:
+; CHECK: %B = load i32, i32* %ptr
+	%A = load i32, i32* %ptr  ; <i32> [#uses=2]
+	br label %Loop
+Loop:
+	%B = load i32, i32* %ptr
+	call void @foo2( i32 %B )
+	br i1 %c, label %Loop, label %Out
+Out:		; preds = %Loop
+	%C = sub i32 %A, %B		; <i32> [#uses=1]
+	ret i32 %C
+}
 
 ; This loop invariant instruction should be constant folded, not hoisted.
-define i32 @test3(i1 %c) {
-; CHECK-LABEL: define i32 @test3(
+define i32 @test4(i1 %c) {
+; CHECK-LABEL: define i32 @test4(
 ; CHECK: call void @foo2(i32 6)
 	%A = load i32, i32* @X		; <i32> [#uses=2]
 	br label %Loop
@@ -65,11 +100,11 @@ Out:		; preds = %Loop
 	ret i32 %C
 }
 
-; CHECK-LABEL: @test4(
+; CHECK-LABEL: @test5(
 ; CHECK: call
 ; CHECK: sdiv
 ; CHECK: ret
-define i32 @test4(i32 %x, i32 %y) nounwind uwtable ssp {
+define i32 @test5(i32 %x, i32 %y) nounwind uwtable ssp {
 entry:
   br label %for.body
 
@@ -91,13 +126,13 @@ for.end:                                          ; preds = %for.body
 declare void @foo_may_call_exit(i32)
 
 ; PR14854
-; CHECK-LABEL: @test5(
+; CHECK-LABEL: @test6(
 ; CHECK: extractvalue
 ; CHECK: br label %tailrecurse
 ; CHECK: tailrecurse:
 ; CHECK: ifend:
 ; CHECK: insertvalue
-define { i32*, i32 } @test5(i32 %i, { i32*, i32 } %e) {
+define { i32*, i32 } @test6(i32 %i, { i32*, i32 } %e) {
 entry:
   br label %tailrecurse
 

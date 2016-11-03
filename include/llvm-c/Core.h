@@ -166,6 +166,8 @@ typedef enum {
   LLVMShuffleVector  = 52,
   LLVMExtractValue   = 53,
   LLVMInsertValue    = 54,
+  LLVMElementCount   = 68,
+  LLVMSeriesVector   = 69,
 
   /* Atomic operators */
   LLVMFence          = 55,
@@ -179,7 +181,11 @@ typedef enum {
   LLVMCatchRet       = 62,
   LLVMCatchPad       = 63,
   LLVMCleanupPad     = 64,
-  LLVMCatchSwitch    = 65
+  LLVMCatchSwitch    = 65,
+
+  /* Predicate operators */
+  LLVMTest           = 70,
+  LLVMPropFF         = 71
 } LLVMOpcode;
 
 typedef enum {
@@ -199,7 +205,9 @@ typedef enum {
   LLVMVectorTypeKind,      /**< SIMD 'packed' format, or other vector type */
   LLVMMetadataTypeKind,    /**< Metadata */
   LLVMX86_MMXTypeKind,     /**< X86 MMX */
-  LLVMTokenTypeKind        /**< Tokens */
+  LLVMTokenTypeKind,       /**< Tokens */
+  LLVMSVEVecTypeKind,      /**< SVE Vector */
+  LLVMSVEPredTypeKind      /**< SVE Predicate */
 } LLVMTypeKind;
 
 typedef enum {

@@ -82,6 +82,10 @@ inline class_match<UndefValue> m_Undef() { return class_match<UndefValue>(); }
 /// \brief Match an arbitrary Constant and ignore it.
 inline class_match<Constant> m_Constant() { return class_match<Constant>(); }
 
+inline class_match<ConstantExpr> m_ConstantExpr() {
+  return class_match<ConstantExpr>();
+}
+
 /// Matching combinators
 template <typename LTy, typename RTy> struct match_combine_or {
   LTy L;
@@ -307,8 +311,14 @@ inline bind_ty<ConstantInt> m_ConstantInt(ConstantInt *&CI) { return CI; }
 /// \brief Match a Constant, capturing the value if we match.
 inline bind_ty<Constant> m_Constant(Constant *&C) { return C; }
 
+/// \brief Match a ConstantExpr, capturing the value if we match.
+inline bind_ty<ConstantExpr> m_ConstantExpr(ConstantExpr *&C) { return C; }
+
 /// \brief Match a ConstantFP, capturing the value if we match.
 inline bind_ty<ConstantFP> m_ConstantFP(ConstantFP *&C) { return C; }
+
+/// \brief Match a PHINode, capturing it if we match.
+inline bind_ty<PHINode> m_PHI(PHINode *&PHI) { return PHI; }
 
 /// \brief Match a specified Value*.
 struct specificval_ty {
@@ -597,6 +607,15 @@ m_NSWShl(const LHS &L, const RHS &R) {
 }
 
 template <typename LHS, typename RHS>
+inline OverflowingBinaryOp_match<LHS, RHS, Instruction::SeriesVector,
+                                 OverflowingBinaryOperator::NoSignedWrap>
+m_NSWSeriesVector(const LHS &L, const RHS &R) {
+  return OverflowingBinaryOp_match<LHS, RHS, Instruction::SeriesVector,
+                                   OverflowingBinaryOperator::NoSignedWrap>(
+      L, R);
+}
+
+template <typename LHS, typename RHS>
 inline OverflowingBinaryOp_match<LHS, RHS, Instruction::Add,
                                  OverflowingBinaryOperator::NoUnsignedWrap>
 m_NUWAdd(const LHS &L, const RHS &R) {
@@ -625,6 +644,15 @@ inline OverflowingBinaryOp_match<LHS, RHS, Instruction::Shl,
                                  OverflowingBinaryOperator::NoUnsignedWrap>
 m_NUWShl(const LHS &L, const RHS &R) {
   return OverflowingBinaryOp_match<LHS, RHS, Instruction::Shl,
+                                   OverflowingBinaryOperator::NoUnsignedWrap>(
+      L, R);
+}
+
+template <typename LHS, typename RHS>
+inline OverflowingBinaryOp_match<LHS, RHS, Instruction::SeriesVector,
+                                 OverflowingBinaryOperator::NoUnsignedWrap>
+m_NUWSeriesVector(const LHS &L, const RHS &R) {
+  return OverflowingBinaryOp_match<LHS, RHS, Instruction::SeriesVector,
                                    OverflowingBinaryOperator::NoUnsignedWrap>(
       L, R);
 }
@@ -715,6 +743,33 @@ struct CmpClass_match {
   }
 };
 
+template <typename LHS_t, typename RHS_t, unsigned Opcode, typename PredicateTy>
+struct CmpOp_match {
+  PredicateTy &Predicate;
+  LHS_t L;
+  RHS_t R;
+
+  CmpOp_match(PredicateTy &Pred, const LHS_t &LHS, const RHS_t &RHS)
+  : Predicate(Pred), L(LHS), R(RHS) {}
+
+  template <typename OpTy> bool match(OpTy *V) {
+    if (V->getValueID() == Value::InstructionVal + Opcode)
+      if (auto *I = dyn_cast<CmpInst>(V))
+        if (L.match(I->getOperand(0)) && R.match(I->getOperand(1))) {
+          Predicate = I->getPredicate();
+          return true;
+        }
+    if (auto *CE = dyn_cast<ConstantExpr>(V))
+      if ((CE->getOpcode() == Opcode) &&
+          L.match(CE->getOperand(0)) &&
+          R.match(CE->getOperand(1))) {
+        Predicate = PredicateTy(CE->getPredicate());
+        return true;
+      }
+    return false;
+  }
+};
+
 template <typename LHS, typename RHS>
 inline CmpClass_match<LHS, RHS, CmpInst, CmpInst::Predicate>
 m_Cmp(CmpInst::Predicate &Pred, const LHS &L, const RHS &R) {
@@ -722,15 +777,15 @@ m_Cmp(CmpInst::Predicate &Pred, const LHS &L, const RHS &R) {
 }
 
 template <typename LHS, typename RHS>
-inline CmpClass_match<LHS, RHS, ICmpInst, ICmpInst::Predicate>
+inline CmpOp_match<LHS, RHS, Instruction::ICmp, ICmpInst::Predicate>
 m_ICmp(ICmpInst::Predicate &Pred, const LHS &L, const RHS &R) {
-  return CmpClass_match<LHS, RHS, ICmpInst, ICmpInst::Predicate>(Pred, L, R);
+  return CmpOp_match<LHS,RHS,Instruction::ICmp,ICmpInst::Predicate>(Pred, L, R);
 }
 
 template <typename LHS, typename RHS>
-inline CmpClass_match<LHS, RHS, FCmpInst, FCmpInst::Predicate>
+inline CmpOp_match<LHS, RHS, Instruction::FCmp, FCmpInst::Predicate>
 m_FCmp(FCmpInst::Predicate &Pred, const LHS &L, const RHS &R) {
-  return CmpClass_match<LHS, RHS, FCmpInst, FCmpInst::Predicate>(Pred, L, R);
+  return CmpOp_match<LHS,RHS,Instruction::FCmp,FCmpInst::Predicate>(Pred, L, R);
 }
 
 //===----------------------------------------------------------------------===//
@@ -790,6 +845,12 @@ inline CastClass_match<OpTy, Instruction::BitCast> m_BitCast(const OpTy &Op) {
   return CastClass_match<OpTy, Instruction::BitCast>(Op);
 }
 
+/// \brief Matches IntToPtr.
+template <typename OpTy>
+inline CastClass_match<OpTy, Instruction::IntToPtr> m_IntToPtr(const OpTy &Op) {
+  return CastClass_match<OpTy, Instruction::IntToPtr>(Op);
+}
+
 /// \brief Matches PtrToInt.
 template <typename OpTy>
 inline CastClass_match<OpTy, Instruction::PtrToInt> m_PtrToInt(const OpTy &Op) {
@@ -824,6 +885,27 @@ inline CastClass_match<OpTy, Instruction::UIToFP> m_UIToFP(const OpTy &Op) {
 template <typename OpTy>
 inline CastClass_match<OpTy, Instruction::SIToFP> m_SIToFP(const OpTy &Op) {
   return CastClass_match<OpTy, Instruction::SIToFP>(Op);
+}
+
+/// Matching combinators
+template <typename OpTy> struct match_any_ext_or_none {
+  OpTy Op;
+
+  match_any_ext_or_none(const OpTy &_Op) : Op(_Op) {}
+
+  template <typename ITy> bool match(ITy *V) {
+    if (CastClass_match<OpTy, Instruction::SExt>(Op).match(V))
+      return true;
+    if (CastClass_match<OpTy, Instruction::ZExt>(Op).match(V))
+      return true;
+    return Op.match(V);
+  }
+};
+
+/// Match <SExt|ZExt|NoExt>(V)
+template <typename OpTy>
+inline match_any_ext_or_none<OpTy> m_AnyExtOrNone(const OpTy &Op) {
+  return match_any_ext_or_none<OpTy>(Op);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1272,6 +1354,111 @@ inline typename m_Intrinsic_Ty<Opnd0, Opnd1>::Ty m_FMax(const Opnd0 &Op0,
   return m_Intrinsic<Intrinsic::maxnum>(Op0, Op1);
 }
 
+template <typename T0, unsigned Opcode>
+struct AnyOneOp_match {
+  T0 Op0;
+
+  AnyOneOp_match(const T0 &Op0)
+  : Op0(Op0) {}
+
+  template <typename OpTy> bool match(OpTy *V) {
+    if (V->getValueID() == Value::InstructionVal + Opcode) {
+      auto *I = cast<Instruction>(V);
+      return Op0.match(I->getOperand(0));
+    }
+    if (auto *CE = dyn_cast<ConstantExpr>(V))
+      return (CE->getOpcode() == Opcode) && Op0.match(CE->getOperand(0));
+    return false;
+  }
+};
+
+template <typename T0, typename T1, unsigned Opcode>
+struct AnyTwoOp_match {
+  T0 Op0;
+  T1 Op1;
+
+  AnyTwoOp_match(const T0 &Op0, const T1 &Op1)
+  : Op0(Op0), Op1(Op1) {}
+
+  template <typename OpTy> bool match(OpTy *V) {
+    if (V->getValueID() == Value::InstructionVal + Opcode) {
+      auto *I = dyn_cast<Instruction>(V);
+      return Op0.match(I->getOperand(0)) && Op1.match(I->getOperand(1));
+    }
+    if (auto *CE = dyn_cast<ConstantExpr>(V))
+      return (CE->getOpcode() == Opcode) &&
+             Op0.match(CE->getOperand(0)) && Op1.match(CE->getOperand(1));
+    return false;
+  }
+};
+
+template <typename T0, typename T1, typename T2, unsigned Opcode>
+struct AnyThreeOp_match {
+  T0 Op1;
+  T1 Op2;
+  T2 Op3;
+
+  AnyThreeOp_match(const T0 &Op1, const T1 &Op2, const T2 &Op3)
+  : Op1(Op1), Op2(Op2), Op3(Op3) {}
+
+  template <typename OpTy> bool match(OpTy *V) {
+    if (V->getValueID() == Value::InstructionVal + Opcode) {
+      auto *I = dyn_cast<Instruction>(V);
+      return Op1.match(I->getOperand(0)) &&
+             Op2.match(I->getOperand(1)) &&
+             Op3.match(I->getOperand(2));
+    }
+    if (auto *CE = dyn_cast<ConstantExpr>(V))
+      return (CE->getOpcode() == Opcode) &&
+             Op1.match(CE->getOperand(0)) &&
+             Op2.match(CE->getOperand(1)) &&
+             Op3.match(CE->getOperand(2));
+    return false;
+  }
+};
+
+template <typename T0, typename T1>
+inline AnyTwoOp_match<T0, T1, Instruction::SeriesVector>
+m_SeriesVector(const T0 &Op0, const T1 &Op1) {
+  return AnyTwoOp_match<T0, T1, Instruction::SeriesVector>(Op0,Op1);
+}
+
+template <typename T0, typename T1, typename T2>
+inline AnyThreeOp_match<T0, T1, T2, Instruction::ShuffleVector>
+m_ShuffleVector(const T0 &Op0, const T1 &Op1, const T2 &Op2) {
+  return AnyThreeOp_match<T0, T1, T2, Instruction::ShuffleVector>(Op0,Op1,Op2);
+}
+
+template <typename T0, typename T1, typename T2>
+inline AnyThreeOp_match<T0, T1, T2, Instruction::InsertElement>
+m_InsertElement(const T0 &Op0, const T1 &Op1, const T2 &Op2) {
+  return AnyThreeOp_match<T0, T1, T2, Instruction::InsertElement>(Op0,Op1,Op2);
+}
+
+template <typename T0, typename T1>
+inline AnyTwoOp_match<T0, T1, Instruction::ExtractElement>
+m_ExtractElement(const T0 &Op0, const T1 &Op1) {
+  return AnyTwoOp_match<T0, T1, Instruction::ExtractElement>(Op0, Op1);
+}
+
+#define m_SplatVector(X) \
+  m_ShuffleVector( \
+    m_InsertElement(m_Undef(), X, m_Zero()), \
+    m_Value(), \
+    m_Zero()) \
+
+template <typename T0, typename T1>
+inline AnyTwoOp_match<T0, T1, Instruction::PropFF>
+m_PropFF(const T0 &Op0, const T1 &Op1) {
+  return AnyTwoOp_match<T0, T1, Instruction::PropFF>(Op0,Op1);
+}
+
+template <typename T0>
+inline AnyOneOp_match<T0, Instruction::ElementCount>
+m_ElementCount(const T0 &Op0) {
+  return AnyOneOp_match<T0, Instruction::ElementCount>(Op0);
+}
+
 template <typename Opnd_t> struct Signum_match {
   Opnd_t Val;
   Signum_match(const Opnd_t &V) : Val(V) {}
@@ -1313,14 +1500,23 @@ template <typename Val_t> inline Signum_match<Val_t> m_Signum(const Val_t &V) {
 }
 
 //===----------------------------------------------------------------------===//
+// Matchers for loads
+//
+
+template <typename T0> inline AnyOneOp_match<T0, Instruction::Load>
+m_Load(const T0 &Op0) { return AnyOneOp_match<T0, Instruction::Load>(Op0); }
+
+//===----------------------------------------------------------------------===//
 // Matchers for two-operands operators with the operators in either order
 //
 
 /// \brief Matches an ICmp with a predicate over LHS and RHS in either order.
 /// Does not swap the predicate.
 template<typename LHS, typename RHS>
-inline match_combine_or<CmpClass_match<LHS, RHS, ICmpInst, ICmpInst::Predicate>,
-                        CmpClass_match<RHS, LHS, ICmpInst, ICmpInst::Predicate>>
+inline match_combine_or<CmpOp_match<LHS, RHS, Instruction::ICmp,
+                                    ICmpInst::Predicate>,
+                        CmpOp_match<RHS, LHS, Instruction::ICmp,
+                                    ICmpInst::Predicate>>
 m_c_ICmp(ICmpInst::Predicate &Pred, const LHS &L, const RHS &R) {
   return m_CombineOr(m_ICmp(Pred, L, R), m_ICmp(Pred, R, L));
 }

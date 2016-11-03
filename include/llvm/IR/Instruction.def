@@ -194,7 +194,11 @@ HANDLE_OTHER_INST(61, ShuffleVector, ShuffleVectorInst)  // shuffle two vectors.
 HANDLE_OTHER_INST(62, ExtractValue, ExtractValueInst)// extract from aggregate
 HANDLE_OTHER_INST(63, InsertValue, InsertValueInst)  // insert into aggregate
 HANDLE_OTHER_INST(64, LandingPad, LandingPadInst)  // Landing pad instruction.
-  LAST_OTHER_INST(64)
+HANDLE_OTHER_INST(65, ElementCount, ElementCountInst) // no. of elements in type
+HANDLE_OTHER_INST(66, SeriesVector, SeriesVectorInst) // vector from a pattern
+HANDLE_OTHER_INST(67, Test, TestInst)     // boolean comparison
+HANDLE_OTHER_INST(68, PropFF, PropFFInst) // propagate first false across vecs.
+  LAST_OTHER_INST(68)
 
 #undef  FIRST_TERM_INST
 #undef HANDLE_TERM_INST

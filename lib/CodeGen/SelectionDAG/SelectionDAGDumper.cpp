@@ -126,6 +126,9 @@ std::string SDNode::getOperationName(const SelectionDAG *G) const {
   }
 
   case ISD::BUILD_VECTOR:               return "BUILD_VECTOR";
+
+  case ISD::ELEMENT_COUNT:              return "ELEMENT_COUNT";
+
   case ISD::TargetConstant:
     if (cast<ConstantSDNode>(this)->isOpaque())
       return "OpaqueTargetConstant";
@@ -221,7 +224,12 @@ std::string SDNode::getOperationName(const SelectionDAG *G) const {
   case ISD::INSERT_SUBVECTOR:           return "insert_subvector";
   case ISD::EXTRACT_SUBVECTOR:          return "extract_subvector";
   case ISD::SCALAR_TO_VECTOR:           return "scalar_to_vector";
+  case ISD::SPLAT_VECTOR:               return "splat_vector";
   case ISD::VECTOR_SHUFFLE:             return "vector_shuffle";
+  case ISD::VECTOR_SHUFFLE_VAR:         return "vector_shuffle_var";
+  case ISD::SERIES_VECTOR:              return "series_vector";
+  case ISD::TEST_VECTOR:                return "test_vector";
+  case ISD::PROPAGATE_FIRST_ZERO:       return "propagate_first_zero";
   case ISD::CARRY_FALSE:                return "carry_false";
   case ISD::ADDC:                       return "addc";
   case ISD::ADDE:                       return "adde";
@@ -355,6 +363,22 @@ std::string SDNode::getOperationName(const SelectionDAG *G) const {
     case ISD::SETTRUE2:                 return "settrue2";
     case ISD::SETFALSE:                 return "setfalse";
     case ISD::SETFALSE2:                return "setfalse2";
+    }
+
+  case ISD::TESTCODE:
+    switch (cast<TestCodeSDNode>(this)->get()) {
+    default: llvm_unreachable("Unknown setcc condition!");
+    case ISD::TEST_ALL_FALSE:           return "test_all_false";
+    case ISD::TEST_ALL_TRUE:            return "test_all_true";
+
+    case ISD::TEST_ANY_FALSE:           return "test_any_false";
+    case ISD::TEST_ANY_TRUE:            return "test_any_true";
+
+    case ISD::TEST_FIRST_FALSE:         return "test_first_false";
+    case ISD::TEST_FIRST_TRUE:          return "test_first_true";
+
+    case ISD::TEST_LAST_FALSE:          return "test_last_false";
+    case ISD::TEST_LAST_TRUE:           return "test_last_true";
     }
   }
 }

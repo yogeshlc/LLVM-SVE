@@ -38,6 +38,10 @@ template <typename T> class ArrayRef;
                                                  Constant *Idx);
   Constant *ConstantFoldShuffleVectorInstruction(Constant *V1, Constant *V2,
                                                  Constant *Mask);
+  Constant *ConstantFoldElementCountInstruction(Type *Ty, Constant *C);
+  Constant *ConstantFoldSeriesVectorInstruction(unsigned NumElts,
+                                                Constant *Start, Constant* Step,
+                                                bool Scalable);
   Constant *ConstantFoldExtractValueInstruction(Constant *Agg,
                                                 ArrayRef<unsigned> Idxs);
   Constant *ConstantFoldInsertValueInstruction(Constant *Agg, Constant *Val,

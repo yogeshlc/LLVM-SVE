@@ -272,6 +272,8 @@ public:
 
   unsigned getPrefetchDistance() { return 0; }
 
+  unsigned getRegisterBitWidthUpperBound(bool Vector) { return 32; }
+
   unsigned getMinPrefetchStride() { return 1; }
 
   unsigned getMaxPrefetchIterationsAhead() { return UINT_MAX; }
@@ -310,6 +312,12 @@ public:
 
   unsigned getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
                            unsigned AddressSpace) {
+    return 1;
+  }
+
+  unsigned getVectorMemoryOpCost(unsigned Opcode, Type *Src, Value *Ptr,
+                                 unsigned Alignment, unsigned AddressSpace,
+                                 const MemAccessInfo &Info) {
     return 1;
   }
 
@@ -362,12 +370,36 @@ public:
     return nullptr;
   }
 
+  bool canReduceInVector(const RecurrenceDescriptor &Desc, bool NoNaN) {
+    return false;
+  }
+
+  Value* getReductionIntrinsic(IRBuilder<> &Builder,
+                               const RecurrenceDescriptor &Desc, bool NoNaN,
+                               Value *Src) {
+    return nullptr;
+  }
+
+  Value* getOrderedReductionIntrinsic(IRBuilder<> &Builder,
+                               const RecurrenceDescriptor &Desc, bool NoNaN,
+                               Value *Src, Value *Start, Value *Predicate) {
+    return nullptr;
+  }
+
   bool areInlineCompatible(const Function *Caller,
                            const Function *Callee) const {
     return (Caller->getFnAttribute("target-cpu") ==
             Callee->getFnAttribute("target-cpu")) &&
            (Caller->getFnAttribute("target-features") ==
             Callee->getFnAttribute("target-features"));
+  }
+
+  bool canVectorizeNonUnitStrides(bool forceFixedWidth = false) {
+    return false;
+  }
+
+  bool vectorizePreventedSLForwarding(void) const {
+    return false;
   }
 };
 
@@ -522,6 +554,31 @@ public:
     return static_cast<T *>(this)->getOperationCost(
         Operator::getOpcode(U), U->getType(),
         U->getNumOperands() == 1 ? U->getOperand(0)->getType() : nullptr);
+  }
+
+  bool hasVectorMemoryOp(unsigned Opcode, Type *Ty, const MemAccessInfo &Info) {
+    bool IsConsecutive = Info.getAccessType() == MemAccessInfo::STRIDED &&
+                         std::abs(Info.getStride()) == 1;
+    if (Info.isUniform())
+      return true;
+    if (Info.isMasked() && Opcode == Instruction::Load)
+      return static_cast<T *>(this)
+          ->isLegalMaskedLoad(Ty->getVectorElementType()/*, IsConsecutive*/);
+    if (Info.isMasked() && Opcode == Instruction::Store)
+      return static_cast<T *>(this)
+          ->isLegalMaskedStore(Ty->getVectorElementType()/*, IsConsecutive*/);
+    return IsConsecutive;
+  }
+
+  unsigned getVectorMemoryOpCost(unsigned Opcode, Type *Src, Value *Ptr,
+                                 unsigned Alignment, unsigned AddressSpace,
+                                 const MemAccessInfo &Info) {
+    if (Info.isMasked())
+      return static_cast<T *>(this)
+          ->getMaskedMemoryOpCost(Opcode, Src, Alignment, AddressSpace);
+    else
+      return static_cast<T *>(this)
+          ->getMemoryOpCost(Opcode, Src, Alignment, AddressSpace);
   }
 };
 }

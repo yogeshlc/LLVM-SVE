@@ -41,6 +41,9 @@ def FeatureFullFP16 : SubtargetFeature<"fullfp16", "HasFullFP16", "true",
 def FeatureSPE : SubtargetFeature<"spe", "HasSPE", "true",
   "Enable Statistical Profiling extension">;
 
+def FeatureSVE : SubtargetFeature<"sve", "HasSVE", "true",
+  "Enable SVE instructions">;
+
 /// Cyclone has register move instructions which are "free".
 def FeatureZCRegMove : SubtargetFeature<"zcm", "HasZeroCycleRegMove", "true",
                                         "Has zero-cycle register moves">;
@@ -239,12 +242,14 @@ def GenericAsmParserVariant : AsmParserVariant {
   int Variant = 0;
   string Name = "generic";
   string BreakCharacters = ".";
+  string TokenizingCharacters = "[]*!/";
 }
 
 def AppleAsmParserVariant : AsmParserVariant {
   int Variant = 1;
   string Name = "apple-neon";
   string BreakCharacters = ".";
+  string TokenizingCharacters = "[]*!/";
 }
 
 //===----------------------------------------------------------------------===//

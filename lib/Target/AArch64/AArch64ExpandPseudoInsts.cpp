@@ -20,6 +20,8 @@
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineInstrBundle.h"
+#include "llvm/CodeGen/RegisterScavenging.h"
 #include "llvm/Support/MathExtras.h"
 using namespace llvm;
 
@@ -38,6 +40,7 @@ public:
   }
 
   const AArch64InstrInfo *TII;
+  RegScavenger *RS;
 
   bool runOnMachineFunction(MachineFunction &Fn) override;
 
@@ -47,11 +50,22 @@ public:
 
 private:
   bool expandMBB(MachineBasicBlock &MBB);
+  unsigned generatePtrue(MachineInstr &MI, MachineBasicBlock &MBB,
+                         MachineBasicBlock::iterator MBBI);
   bool expandMI(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
                 MachineBasicBlock::iterator &NextMBBI);
+  bool expandMI(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI);
   bool expandMOVImm(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
                     unsigned BitSize);
-
+  bool expand_DestructiveOp(MachineInstr &MI, MachineBasicBlock &MBB,
+                      MachineBasicBlock::iterator MBBI);
+  bool expandSVE_SelZero(MachineInstr &MI, MachineBasicBlock &MBB,
+                      MachineBasicBlock::iterator MBBI);
+  bool foldWithSelZero(MachineBasicBlock &MBB,
+                       MachineBasicBlock::iterator MBBI,
+                       MachineBasicBlock::iterator &Use);
+  bool expandSVE_FMLA(MachineInstr &MI, MachineBasicBlock &MBB,
+                      MachineBasicBlock::iterator MBBI);
   bool expandCMP_SWAP(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
                       unsigned LdarOp, unsigned StlrOp, unsigned CmpOp,
                       unsigned ExtendImm, unsigned ZeroReg,
@@ -589,6 +603,111 @@ bool AArch64ExpandPseudo::expandMOVImm(MachineBasicBlock &MBB,
   return true;
 }
 
+bool AArch64ExpandPseudo::expandSVE_SelZero(MachineInstr &MI,
+                                            MachineBasicBlock &MBB,
+                                            MachineBasicBlock::iterator MBBI) {
+  unsigned Opcode;
+  switch(MI.getOpcode()) {
+  default:
+    llvm_unreachable("unsupported opcode");
+  case AArch64::SELZERO_B:
+    Opcode = AArch64::SEL_ZPZZ_B;
+    break;
+  case AArch64::SELZERO_H:
+    Opcode = AArch64::SEL_ZPZZ_H;
+    break;
+  case AArch64::SELZERO_S:
+    Opcode = AArch64::SEL_ZPZZ_S;
+    break;
+  case AArch64::SELZERO_D:
+    Opcode = AArch64::SEL_ZPZZ_D;
+    break;
+  }
+
+  MachineInstrBuilder MIB;
+  MIB = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(Opcode))
+          .addOperand(MI.getOperand(0))
+          .addOperand(MI.getOperand(1))
+          .addOperand(MI.getOperand(2))
+          .addOperand(MI.getOperand(3));
+
+  transferImpOps(MI, MIB, MIB);
+  MI.eraseFromParent();
+  return true;
+}
+
+bool AArch64ExpandPseudo::foldWithSelZero(MachineBasicBlock &MBB,
+                                          MachineBasicBlock::iterator MBBI,
+                                          MachineBasicBlock::iterator &Use) {
+  MachineInstr &MI = *MBBI;
+
+  // Get the register that is defined (restrict to only 1)
+  MachineOperand Def = *MI.defs().begin();
+  for (MachineOperand D : MI.defs()) {
+    if (D.getParent() != Def.getParent())
+      return false;
+  }
+
+  if (!Def.isReg())
+    return false;
+
+  int Reg = Def.getReg();
+  auto TRI = &TII->getRegisterInfo();
+
+  // Check that Def is used by a SELZERO pseudo
+  auto Next = MBBI;
+  for (++Next; !Next->isTerminator() && Next != MBB.end(); ++Next) {
+    bool IsSelZero;
+    switch(Next->getOpcode()) {
+    case AArch64::SELZERO_B:
+    case AArch64::SELZERO_H:
+    case AArch64::SELZERO_S:
+    case AArch64::SELZERO_D:
+      IsSelZero = true;
+      break;
+    default:
+      IsSelZero = false;
+      break;
+    }
+
+    // We have a match iff:
+    //  ADD  Z1, Pg, Z2, Z3
+    //  SEL  Z1, Pg, Z1, 0
+    // Or:
+    //  ADD  Z1, Pg, Z2, Z3
+    //  SEL  Z4, Pg, Z1, 0    <- Z4 != Z1, so only fold if Z1 is
+    //                                     dead after this use.
+    if (IsSelZero && Next->readsRegister(Reg) &&
+        (Next->definesRegister(Reg) || Next->killsRegister(Reg))) {
+      Use = Next;
+      break;
+    }
+
+    // Otherwise, check if there is need to continue
+    if (Next->modifiesRegister(Reg, TRI))
+      return false;
+
+    if (Next->readsRegister(Reg, TRI))
+      return false;
+  }
+
+  // We did not find a SELZERO, nothing to fold
+  if (Use != Next)
+    return false;
+
+  // Check if Dst register of SEL is used in between DOP (e.g. ADD) and SEL.
+  Reg = Next->defs().begin()->getReg();
+  Next = MBBI;
+  while (!(++Next)->isTerminator()) {
+    if (Next == Use)
+      break;
+    if (Next->readsRegister(Reg))
+      return false;
+  }
+
+  return true;
+}
+
 static void addPostLoopLiveIns(MachineBasicBlock *MBB, LivePhysRegs &LiveRegs) {
   for (auto I = LiveRegs.begin(); I != LiveRegs.end(); ++I)
     MBB->addLiveIn(*I);
@@ -665,6 +784,384 @@ bool AArch64ExpandPseudo::expandCMP_SWAP(
   MBB.addSuccessor(LoadCmpBB);
 
   NextMBBI = MBB.end();
+  MI.eraseFromParent();
+  return true;
+}
+
+#define DOP_ENTRY(ps,inst,movprfx,ty)\
+  { AArch64::ps, { AArch64::ps, AArch64::inst,\
+                   AArch64::inst,  AArch64::movprfx, ty } }
+
+#define DOP_ENTRY_D(ps,inst,ty)\
+  { AArch64::ps##_D, { AArch64::ps##_D, AArch64::inst##_D,\
+                       AArch64::inst##_D, AArch64::MOVPRFX_ZPzZ##_D, ty } }
+
+#define DOP_ENTRY_SD(ps,inst,ty)\
+  { AArch64::ps##_S, { AArch64::ps##_S, AArch64::inst##_S,\
+                       AArch64::inst##_S, AArch64::MOVPRFX_ZPzZ##_S, ty } },\
+  DOP_ENTRY_D(ps,inst,ty)
+
+#define DOP_ENTRY_HSD(ps,inst,ty)\
+  { AArch64::ps##_H, { AArch64::ps##_H, AArch64::inst##_H,\
+                       AArch64::inst##_H, AArch64::MOVPRFX_ZPzZ##_H, ty } },\
+  DOP_ENTRY_SD(ps,inst,ty)
+
+#define DOP_ENTRY_BHSD(ps,inst,ty)\
+  { AArch64::ps##_B, { AArch64::ps##_B, AArch64::inst##_B,\
+                       AArch64::inst##_B, AArch64::MOVPRFX_ZPzZ##_B, ty } },\
+  DOP_ENTRY_HSD(ps,inst,ty)
+
+#define DOP_ENTRY_COMM_SD(ps,inst,cinst,ty)\
+  { AArch64::ps##_S, { AArch64::ps##_S, AArch64::inst##_S,\
+                       AArch64::cinst##_S, AArch64::MOVPRFX_ZPzZ##_S, ty } },\
+  { AArch64::ps##_D, { AArch64::ps##_D, AArch64::inst##_D,\
+                       AArch64::cinst##_D, AArch64::MOVPRFX_ZPzZ##_D, ty } }
+
+#define DOP_ENTRY_COMM_BHSD(ps,inst,cinst,ty)\
+  { AArch64::ps##_B, { AArch64::ps##_B, AArch64::inst##_B,\
+                       AArch64::cinst##_B, AArch64::MOVPRFX_ZPzZ##_B, ty } },\
+  { AArch64::ps##_H, { AArch64::ps##_H, AArch64::inst##_H,\
+                       AArch64::cinst##_H, AArch64::MOVPRFX_ZPzZ##_H, ty } },\
+  DOP_ENTRY_COMM_SD(ps,inst,cinst,ty)
+enum DOPType {
+  Unary,
+  Binary_Commutative,
+  Binary_Restricted
+};
+
+struct DOPTableEntry {
+  unsigned    PseudoOpcode;
+  unsigned    InstrOpcode;
+  unsigned    CommInstrOpcode;
+  unsigned    MovPrfxOpcode;
+  DOPType     DType;
+
+  bool isConstrained() {
+    return (DType == Unary || DType == Binary_Restricted);
+  }
+};
+
+
+std::map<unsigned, DOPTableEntry> DOPTable {
+  // sve_int_bin_pred_log
+  DOP_ENTRY_BHSD      (ORR_ZPmZZ,   ORR_ZPmZ,               Binary_Commutative),
+  DOP_ENTRY_BHSD      (EOR_ZPmZZ,   EOR_ZPmZ,               Binary_Commutative),
+  DOP_ENTRY_BHSD      (AND_ZPmZZ,   AND_ZPmZ,               Binary_Commutative),
+  DOP_ENTRY_BHSD      (BIC_ZPmZZ,   BIC_ZPmZ,               Binary_Commutative),
+  // sve_int_bin_pred_arit_0
+  DOP_ENTRY_BHSD      (ADD_ZPmZZ,   ADD_ZPmZ,               Binary_Commutative),
+  DOP_ENTRY_COMM_BHSD (SUB_ZPmZZ,   SUB_ZPmZ,   SUBR_ZPmZ,  Binary_Commutative),
+  DOP_ENTRY_COMM_BHSD (SUBR_ZPmZZ,  SUBR_ZPmZ,  SUB_ZPmZ,   Binary_Commutative),
+  // sve_int_bin_pred_arit_1
+  DOP_ENTRY_BHSD      (SMAX_ZPmZZ,  SMAX_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_BHSD      (UMAX_ZPmZZ,  UMAX_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_BHSD      (SMIN_ZPmZZ,  SMIN_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_BHSD      (UMIN_ZPmZZ,  UMIN_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_BHSD      (SABD_ZPmZZ,  SABD_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_BHSD      (UABD_ZPmZZ,  UABD_ZPmZ,              Binary_Commutative),
+  // sve_int_bin_pred_arit_2
+  DOP_ENTRY_BHSD      (MUL_ZPmZZ,   MUL_ZPmZ,               Binary_Commutative),
+  DOP_ENTRY_BHSD      (UMULH_ZPmZZ, UMULH_ZPmZ,             Binary_Commutative),
+  DOP_ENTRY_BHSD      (SMULH_ZPmZZ, SMULH_ZPmZ,             Binary_Commutative),
+  DOP_ENTRY_COMM_SD   (SDIV_ZPmZZ,  SDIV_ZPmZ,  SDIVR_ZPmZ, Binary_Commutative),
+  DOP_ENTRY_COMM_SD   (UDIV_ZPmZZ,  UDIV_ZPmZ,  UDIVR_ZPmZ, Binary_Commutative),
+  DOP_ENTRY_COMM_SD   (SDIVR_ZPmZZ, SDIVR_ZPmZ, SDIV_ZPmZ,  Binary_Commutative),
+  DOP_ENTRY_COMM_SD   (UDIVR_ZPmZZ, UDIVR_ZPmZ, UDIV_ZPmZ,  Binary_Commutative),
+  // sve_fp_2op_p_zds
+  DOP_ENTRY_SD        (FADD_ZPmZZ,  FADD_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_SD        (FMUL_ZPmZZ,  FMUL_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_SD        (FMAXNM_ZPmZZ,FMAXNM_ZPmZ,            Binary_Commutative),
+  DOP_ENTRY_SD        (FMINNM_ZPmZZ,FMINNM_ZPmZ,            Binary_Commutative),
+  DOP_ENTRY_SD        (FMAX_ZPmZZ,  FMAX_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_SD        (FMIN_ZPmZZ,  FMIN_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_SD        (FABD_ZPmZZ,  FABD_ZPmZ,              Binary_Commutative),
+  DOP_ENTRY_SD        (FMULX_ZPmZZ, FMULX_ZPmZ,             Binary_Commutative),
+  DOP_ENTRY_SD        (FSCALE_ZPmZ, FSCALE_ZPmZ,            Binary_Restricted),
+  DOP_ENTRY_COMM_SD   (FSUB_ZPmZZ,  FSUB_ZPmZ,  FSUBR_ZPmZ, Binary_Commutative),
+  DOP_ENTRY_COMM_SD   (FSUBR_ZPmZZ, FSUBR_ZPmZ, FSUB_ZPmZ,  Binary_Commutative),
+  DOP_ENTRY_COMM_SD   (FDIV_ZPmZZ,  FDIV_ZPmZ,  FDIVR_ZPmZ, Binary_Commutative),
+  DOP_ENTRY_COMM_SD   (FDIVR_ZPmZZ, FDIVR_ZPmZ, FDIV_ZPmZ,  Binary_Commutative),
+  // sve_int_un_pred_arit_0
+  DOP_ENTRY_BHSD      (ABS_ZPmZ,    ABS_ZPmZ,   Unary),
+  DOP_ENTRY_BHSD      (NEG_ZPmZ,    NEG_ZPmZ,   Unary),
+  DOP_ENTRY_HSD       (SXTB_ZPmZ,   SXTB_ZPmZ,  Unary),
+  DOP_ENTRY_HSD       (UXTB_ZPmZ,   UXTB_ZPmZ,  Unary),
+  DOP_ENTRY_SD        (SXTH_ZPmZ,   SXTH_ZPmZ,  Unary),
+  DOP_ENTRY_SD        (UXTH_ZPmZ,   UXTH_ZPmZ,  Unary),
+  DOP_ENTRY_D         (SXTW_ZPmZ,   SXTW_ZPmZ,  Unary),
+  DOP_ENTRY_D         (UXTW_ZPmZ,   UXTW_ZPmZ,  Unary),
+  // sve_int_un_pred_arit_1
+  DOP_ENTRY_BHSD      (CLS_ZPmZ,    CLS_ZPmZ,   Unary),
+  DOP_ENTRY_BHSD      (CLZ_ZPmZ,    CLZ_ZPmZ,   Unary),
+  DOP_ENTRY_BHSD      (CNT_ZPmZ,    CNT_ZPmZ,   Unary),
+  DOP_ENTRY_BHSD      (CNOT_ZPmZ,   CNOT_ZPmZ,  Unary),
+  DOP_ENTRY_BHSD      (NOT_ZPmZ,    NOT_ZPmZ,   Unary),
+  DOP_ENTRY_SD        (FNEG_ZPmZ,   FNEG_ZPmZ,  Unary),
+  DOP_ENTRY_SD        (FABS_ZPmZ,   FABS_ZPmZ,  Unary),
+  // sve_fp_2op_p_zd
+  DOP_ENTRY_SD        (FRINTN_ZPmZ, FRINTN_ZPmZ,Unary),
+  DOP_ENTRY_SD        (FRINTP_ZPmZ, FRINTP_ZPmZ,Unary),
+  DOP_ENTRY_SD        (FRINTM_ZPmZ, FRINTM_ZPmZ,Unary),
+  DOP_ENTRY_SD        (FRINTZ_ZPmZ, FRINTZ_ZPmZ,Unary),
+  DOP_ENTRY_SD        (FRINTA_ZPmZ, FRINTA_ZPmZ,Unary),
+  DOP_ENTRY_SD        (FRINTX_ZPmZ, FRINTX_ZPmZ,Unary),
+  DOP_ENTRY_SD        (FRINTI_ZPmZ, FRINTI_ZPmZ,Unary),
+  DOP_ENTRY_SD        (FRECPX_ZPmZ, FRECPX_ZPmZ,Unary),
+  DOP_ENTRY_SD        (FSQRT_ZPmZ,  FSQRT_ZPmZ, Unary),
+  DOP_ENTRY         (FCVT_ZPmZ_StoH,   FCVT_ZPmZ_StoH,   MOVPRFX_ZPzZ_H, Unary),
+  DOP_ENTRY         (FCVT_ZPmZ_HtoS,   FCVT_ZPmZ_HtoS,   MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (SCVTF_ZPmZ_StoS,  SCVTF_ZPmZ_StoS,  MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (UCVTF_ZPmZ_StoS,  UCVTF_ZPmZ_StoS,  MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (FCVTZS_ZPmZ_StoS, FCVTZS_ZPmZ_StoS, MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (FCVTZU_ZPmZ_StoS, FCVTZU_ZPmZ_StoS, MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (FCVT_ZPmZ_DtoH,   FCVT_ZPmZ_DtoH,   MOVPRFX_ZPzZ_H, Unary),
+  DOP_ENTRY         (FCVT_ZPmZ_HtoD,   FCVT_ZPmZ_HtoD,   MOVPRFX_ZPzZ_D, Unary),
+  DOP_ENTRY         (FCVT_ZPmZ_DtoS,   FCVT_ZPmZ_DtoS,   MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (FCVT_ZPmZ_StoD,   FCVT_ZPmZ_StoD,   MOVPRFX_ZPzZ_D, Unary),
+  DOP_ENTRY         (SCVTF_ZPmZ_StoD,  SCVTF_ZPmZ_StoD,  MOVPRFX_ZPzZ_D, Unary),
+  DOP_ENTRY         (UCVTF_ZPmZ_StoD,  UCVTF_ZPmZ_StoD,  MOVPRFX_ZPzZ_D, Unary),
+  DOP_ENTRY         (SCVTF_ZPmZ_DtoS,  SCVTF_ZPmZ_DtoS,  MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (UCVTF_ZPmZ_DtoS,  UCVTF_ZPmZ_DtoS,  MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (SCVTF_ZPmZ_DtoD,  SCVTF_ZPmZ_DtoD,  MOVPRFX_ZPzZ_D, Unary),
+  DOP_ENTRY         (UCVTF_ZPmZ_DtoD,  UCVTF_ZPmZ_DtoD,  MOVPRFX_ZPzZ_D, Unary),
+  DOP_ENTRY         (FCVTZS_ZPmZ_DtoS, FCVTZS_ZPmZ_DtoS, MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (FCVTZU_ZPmZ_DtoS, FCVTZU_ZPmZ_DtoS, MOVPRFX_ZPzZ_S, Unary),
+  DOP_ENTRY         (FCVTZS_ZPmZ_StoD, FCVTZS_ZPmZ_StoD, MOVPRFX_ZPzZ_D, Unary),
+  DOP_ENTRY         (FCVTZU_ZPmZ_StoD, FCVTZU_ZPmZ_StoD, MOVPRFX_ZPzZ_D, Unary),
+  DOP_ENTRY         (FCVTZS_ZPmZ_DtoD, FCVTZS_ZPmZ_DtoD, MOVPRFX_ZPzZ_D, Unary),
+  DOP_ENTRY         (FCVTZU_ZPmZ_DtoD, FCVTZU_ZPmZ_DtoD, MOVPRFX_ZPzZ_D, Unary)
+};
+
+static DOPTableEntry getDOPInfo(MachineInstr &MI) {
+  assert (DOPTable.count(MI.getOpcode()) &&
+          "Unsupported instruction");
+
+  return DOPTable[MI.getOpcode()];
+}
+
+static void removeDupIfNotUsed(MachineOperand &ZeroOpnd,
+                               MachineBasicBlock::iterator Start,
+                               MachineBasicBlock::iterator End) {
+  if (!ZeroOpnd.isKill())
+    return;
+
+  unsigned ZeroReg = ZeroOpnd.getReg();
+  MachineBasicBlock::iterator MBBI = Start;
+  for (--MBBI; ; --MBBI) {
+    // Stop conditions:
+    // - don't remove dup(0) if it is not defined in this block
+    // - don't remove dup(0) if it is used outside of the select
+    if (MBBI == End ||
+        MBBI->readsRegister(ZeroReg) ||
+       (MBBI->definesRegister(ZeroReg) && MBBI->isPHI()))
+      break;
+
+    // Otherwise, remove def
+    if (MBBI->definesRegister(ZeroReg)) {
+      MBBI->eraseFromParent();
+      break;
+    }
+  }
+}
+
+bool AArch64ExpandPseudo::expand_DestructiveOp(
+                            MachineInstr &MI,
+                            MachineBasicBlock &MBB,
+                            MachineBasicBlock::iterator MBBI) {
+  DOPTableEntry Info = getDOPInfo(MI);
+
+  unsigned PredIdx = 1, DOPIdx = 2, SrcIdx = 3;
+  unsigned RevDOPIdx = 3, RevSrcIdx = 2;
+
+  if (Info.DType == Unary)
+    std::swap(PredIdx, DOPIdx);
+
+  unsigned DstReg = MI.getOperand(0).getReg();
+  bool DstIsDead = MI.getOperand(0).isDead();
+  MachineInstrBuilder PRFX, DOP;
+
+  assert((!Info.isConstrained() ||
+           DstReg == MI.getOperand(DOPIdx).getReg()) &&
+         "Expecting Dst to be equal to DOP Src");
+
+  // Reverse the operands and/or instruction opcode,
+  // e.g.
+  // FADD Zd, Pg/m, Zs1, Zd  ==> FADD    Zd, Pg/m, Zd, Zs1
+  // FSUB Zd, Pg/m, Zs1, Zd  ==> FSUBR   Zd, Pg/m, Zd, Zs1
+  if (!Info.isConstrained() &&
+      DstReg == MI.getOperand(RevDOPIdx).getReg()) {
+    Info.InstrOpcode = Info.CommInstrOpcode;
+    SrcIdx = RevSrcIdx;
+    DOPIdx = RevDOPIdx;
+  }
+
+  // If we can merge with a SEL w/ 0, create a movprfx
+  // and remove the dup(0), e.g.
+  // FSUB Zd,  Pg, Zs1, Zs2  ==>  MOVPRFX Zd2, Pg/z, Zs1
+  // SEL  Zd2, Pg,  Zd,   0       FSUB    Zd2, Pg, Zd2, Zs2
+  //
+  // [Note] movprfx can only be used if Zd2 is used solely
+  // as the destructive operand, not as any other operand
+  // in the prefixed instruction.
+  MachineBasicBlock::iterator SelZero;
+  if (foldWithSelZero(MBB, MBBI, SelZero) &&
+      SelZero->defs().begin()->getReg() != MI.getOperand(SrcIdx).getReg()) {
+    // Use result register of SELECT
+    MachineOperand &Def = *SelZero->defs().begin();
+    PRFX = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(Info.MovPrfxOpcode))
+      .addOperand(Def)
+      .addOperand(MI.getOperand(PredIdx))
+      .addOperand(MI.getOperand(DOPIdx));
+
+    // DstReg is used in the destructive operation
+    DstReg = Def.getReg();
+
+    // Remove the dup(0) if it is no longer used
+    MachineOperand &ZeroOpnd = SelZero->getOperand(3);
+    removeDupIfNotUsed(ZeroOpnd, SelZero, MBB.instr_begin());
+
+    // Remove the select itself
+    SelZero->eraseFromParent();
+  } else if(DstReg != MI.getOperand(DOPIdx).getReg() &&
+            DstReg != MI.getOperand(SrcIdx).getReg()) {
+    // FSUB Zd, Pg, Zs1, Zs2 ==> MOVPRFX Zd, Zs1
+    //                           FSUB    Zd, Pg, Zd, Zs2
+    PRFX = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(AArch64::MOVPRFX_ZZ))
+      .addOperand(MI.getOperand(0))
+      .addOperand(MI.getOperand(DOPIdx));
+    // After the movprfx, the destructive operand is MI.opnd(0)
+    DOPIdx = 0;
+  }
+
+  //
+  // Create the destructive operation
+  //
+  unsigned Opnds[] = { PredIdx, DOPIdx, SrcIdx };
+  if (Info.DType == Unary)
+    std::swap(Opnds[0], Opnds[1]);
+
+  DOP = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(Info.InstrOpcode))
+    .addReg(DstReg, RegState::Define | getDeadRegState(DstIsDead))
+    .addOperand(MI.getOperand(Opnds[0]))
+    .addOperand(MI.getOperand(Opnds[1]))
+    .addOperand(MI.getOperand(Opnds[2]));
+
+  if (PRFX) {
+    finalizeBundle(MBB, PRFX->getIterator(), MBBI->getIterator());
+    transferImpOps(MI, PRFX, DOP);
+  } else
+    transferImpOps(MI, DOP, DOP);
+
+  MI.eraseFromParent();
+  return true;
+}
+
+bool AArch64ExpandPseudo::expandSVE_FMLA(MachineInstr &MI,
+                                         MachineBasicBlock &MBB,
+                                         MachineBasicBlock::iterator MBBI) {
+  unsigned Opcode, OpcodeR;
+  switch (MI.getOpcode()) {
+  default:
+    llvm_unreachable("unexpected opcode!");
+  case AArch64::FMLA_ZPZZZ_D:
+    Opcode  = AArch64::FMLA_ZPmZZ_D;
+    OpcodeR = AArch64::FMAD_ZPmZZ_D;
+    break;
+  case AArch64::FMLA_ZPZZZ_S:
+    Opcode  = AArch64::FMLA_ZPmZZ_S;
+    OpcodeR = AArch64::FMAD_ZPmZZ_S;
+    break;
+  case AArch64::FMLS_ZPZZZ_D:
+    Opcode  = AArch64::FMLS_ZPmZZ_D;
+    OpcodeR = AArch64::FMSB_ZPmZZ_D;
+    break;
+  case AArch64::FMLS_ZPZZZ_S:
+    Opcode  = AArch64::FMLS_ZPmZZ_S;
+    OpcodeR = AArch64::FMSB_ZPmZZ_S;
+    break;
+  case AArch64::FNMLA_ZPZZZ_D:
+    Opcode  = AArch64::FNMLA_ZPmZZ_D;
+    OpcodeR = AArch64::FNMAD_ZPmZZ_D;
+    break;
+  case AArch64::FNMLA_ZPZZZ_S:
+    Opcode  = AArch64::FNMLA_ZPmZZ_S;
+    OpcodeR = AArch64::FNMAD_ZPmZZ_S;
+    break;
+  case AArch64::FNMLS_ZPZZZ_D:
+    Opcode  = AArch64::FNMLS_ZPmZZ_D;
+    OpcodeR = AArch64::FNMSB_ZPmZZ_D;
+    break;
+  case AArch64::FNMLS_ZPZZZ_S:
+    Opcode  = AArch64::FNMLS_ZPmZZ_S;
+    OpcodeR = AArch64::FNMSB_ZPmZZ_S;
+    break;
+  }
+
+  // FMLA Zd, Pg, Zd, Zn, Zm ==> FMLA Zda, Pg, Zn, Zm
+  if (MI.getOperand(0).getReg() == MI.getOperand(2).getReg()) {
+    MachineInstrBuilder MIB;
+    MIB = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(Opcode))
+      .addOperand(MI.getOperand(0))
+      .addOperand(MI.getOperand(1))
+      .addOperand(MI.getOperand(2))
+      .addOperand(MI.getOperand(3))
+      .addOperand(MI.getOperand(4));
+
+    transferImpOps(MI, MIB, MIB);
+    MI.eraseFromParent();
+    return true;
+  }
+
+  // FMLA Zd, Pg, Za, Zd, Zm ==> FMAD Zdn, Pg, Zm, Za
+  if (MI.getOperand(0).getReg() == MI.getOperand(3).getReg()) {
+    MachineInstrBuilder MIB;
+    MIB = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(OpcodeR))
+    .addOperand(MI.getOperand(0))
+    .addOperand(MI.getOperand(1))
+    .addOperand(MI.getOperand(3))
+    .addOperand(MI.getOperand(4))
+    .addOperand(MI.getOperand(2));
+
+    transferImpOps(MI, MIB, MIB);
+    MI.eraseFromParent();
+    return true;
+  }
+
+  // FMLA Zd, Pg, Za, Zm, Zd ==> FMAD Zdn, Pg, Zm, Za
+  if (MI.getOperand(0).getReg() == MI.getOperand(4).getReg()) {
+    MachineInstrBuilder MIB;
+    MIB = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(OpcodeR))
+    .addOperand(MI.getOperand(0))
+    .addOperand(MI.getOperand(1))
+    .addOperand(MI.getOperand(4))
+    .addOperand(MI.getOperand(3))
+    .addOperand(MI.getOperand(2));
+
+    transferImpOps(MI, MIB, MIB);
+    MI.eraseFromParent();
+    return true;
+  }
+
+  unsigned DstReg = MI.getOperand(0).getReg();
+  bool DstIsDead = MI.getOperand(0).isDead();
+  MachineInstrBuilder PRFX /* Prefix */, DOP /* Destructive Operation */;
+
+  // FMLA Zd, Pg, Za, Zn, Zm ==> MOVPRFX Zd, Za
+  //                             FMLA    Zda, Pg, Zn, Zm
+  PRFX = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(AArch64::MOVPRFX_ZZ))
+    .addOperand(MI.getOperand(0))
+    .addOperand(MI.getOperand(2));
+
+  DOP = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(Opcode))
+    .addReg(DstReg, RegState::Define | getDeadRegState(DstIsDead))
+    .addOperand(MI.getOperand(1))
+    .addReg(DstReg)
+    .addOperand(MI.getOperand(3))
+    .addOperand(MI.getOperand(4));
+
+
+  finalizeBundle(MBB, PRFX->getIterator(), MBBI->getIterator());
+  transferImpOps(MI, PRFX, DOP);
   MI.eraseFromParent();
   return true;
 }
@@ -756,6 +1253,20 @@ bool AArch64ExpandPseudo::expandCMP_SWAP_128(
   return true;
 }
 
+/// \brief Uses RegScavenger to find a spare PPRR register, and generates
+/// PTRUE_B into it.  Returns the registerID
+unsigned AArch64ExpandPseudo::generatePtrue(MachineInstr &MI,
+                                            MachineBasicBlock &MBB,
+                                            MachineBasicBlock::iterator MBBI) {
+  RS->enterBasicBlock(MBB);
+  RS->forward(MBBI);
+  unsigned PReg = RS->FindUnusedReg(&AArch64::PPRRRegClass);
+  assert(PReg && "Failed to scavange a predicate register to generate PTRUE");
+  BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(AArch64::PTRUE_B), PReg)
+         .addImm(31);
+  return PReg;
+}
+
 /// \brief If MBBI references a pseudo instruction that should be expanded here,
 /// do the expansion and return true.  Otherwise return false.
 bool AArch64ExpandPseudo::expandMI(MachineBasicBlock &MBB,
@@ -763,6 +1274,12 @@ bool AArch64ExpandPseudo::expandMI(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator &NextMBBI) {
   MachineInstr &MI = *MBBI;
   unsigned Opcode = MI.getOpcode();
+
+
+  // Check if we can expand the destructive op
+  if (DOPTable.count(MI.getOpcode()) && !MI.isBundledWithPred())
+    return expand_DestructiveOp(MI, MBB, MBBI);
+
   switch (Opcode) {
   default:
     break;
@@ -902,6 +1419,23 @@ bool AArch64ExpandPseudo::expandMI(MachineBasicBlock &MBB,
     MI.eraseFromParent();
     return true;
   }
+
+  case AArch64::SELZERO_B:
+  case AArch64::SELZERO_H:
+  case AArch64::SELZERO_S:
+  case AArch64::SELZERO_D:
+    return expandSVE_SelZero(MI, MBB, MBBI);
+
+  case AArch64::FMLA_ZPZZZ_D:
+  case AArch64::FMLA_ZPZZZ_S:
+  case AArch64::FMLS_ZPZZZ_D:
+  case AArch64::FMLS_ZPZZZ_S:
+  case AArch64::FNMLA_ZPZZZ_D:
+  case AArch64::FNMLA_ZPZZZ_S:
+  case AArch64::FNMLS_ZPZZZ_D:
+  case AArch64::FNMLS_ZPZZZ_S:
+    return expandSVE_FMLA(MI, MBB, MBBI);
+
   case AArch64::CMP_SWAP_8:
     return expandCMP_SWAP(MBB, MBBI, AArch64::LDAXRB, AArch64::STLXRB,
                           AArch64::SUBSWrx,
@@ -924,6 +1458,60 @@ bool AArch64ExpandPseudo::expandMI(MachineBasicBlock &MBB,
                           AArch64::XZR, NextMBBI);
   case AArch64::CMP_SWAP_128:
     return expandCMP_SWAP_128(MBB, MBBI, NextMBBI);
+
+  case AArch64::STR_ZZXI:
+  case AArch64::STR_ZZZXI:
+  case AArch64::STR_ZZZZXI: {
+    unsigned Opcode;
+    switch (MI.getOpcode()) {
+    default: llvm_unreachable("Unexpected opcode");
+    case AArch64::STR_ZZXI:   Opcode = AArch64::ST2B_IMM; break;
+    case AArch64::STR_ZZZXI:  Opcode = AArch64::ST3B_IMM; break;
+    case AArch64::STR_ZZZZXI: Opcode = AArch64::ST4B_IMM; break;
+    }
+    unsigned PReg = generatePtrue(MI, MBB, MBBI);
+    assert(MI.getOperand(2).isImm() && "Expected immediate operand");
+    int64_t Imm = MI.getOperand(2).getImm();
+    MachineInstrBuilder MIB =
+      BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(Opcode))
+             .addOperand(MI.getOperand(0))
+             .addReg(PReg, getKillRegState(true))
+             .addOperand(MI.getOperand(1))
+             .addImm(Imm);
+    transferImpOps(MI, MIB, MIB);
+    MI.eraseFromParent();
+    return true;
+  }
+  case AArch64::LDR_ZZXI:
+  case AArch64::LDR_ZZZXI:
+  case AArch64::LDR_ZZZZXI: {
+    unsigned Opcode;
+    switch (MI.getOpcode()) {
+    default: llvm_unreachable("Unexpected opcode");
+    case AArch64::LDR_ZZXI:   Opcode = AArch64::LD2B_IMM; break;
+    case AArch64::LDR_ZZZXI:  Opcode = AArch64::LD3B_IMM; break;
+    case AArch64::LDR_ZZZZXI: Opcode = AArch64::LD4B_IMM; break;
+    }
+    unsigned PReg = generatePtrue(MI, MBB, MBBI);
+    assert(MI.getOperand(2).isImm() && "Expected immediate operand");
+    int64_t Imm = MI.getOperand(2).getImm();
+    MachineInstrBuilder MIB =
+      BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(Opcode),
+              MI.getOperand(0).getReg()).addReg(PReg, getKillRegState(true))
+                                        .addOperand(MI.getOperand(1))
+                                        .addImm(Imm);
+    transferImpOps(MI, MIB, MIB);
+    MI.eraseFromParent();
+    return true;
+  }
+  case AArch64::RDFFR_P: {
+    MachineInstrBuilder MIB =
+      BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(AArch64::RDFFR_P_REAL),
+              MI.getOperand(0).getReg());
+    transferImpOps(MI, MIB, MIB);
+    MI.eraseFromParent();
+    return true;
+  }
   }
   return false;
 }
@@ -945,6 +1533,8 @@ bool AArch64ExpandPseudo::expandMBB(MachineBasicBlock &MBB) {
 
 bool AArch64ExpandPseudo::runOnMachineFunction(MachineFunction &MF) {
   TII = static_cast<const AArch64InstrInfo *>(MF.getSubtarget().getInstrInfo());
+  auto UniqueRS = make_unique<RegScavenger>();
+  RS = UniqueRS.get();
 
   bool Modified = false;
   for (auto &MBB : MF)

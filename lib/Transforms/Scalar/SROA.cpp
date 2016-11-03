@@ -2586,8 +2586,8 @@ private:
   }
 
   /// \brief Compute a vector splat for a given element value.
-  Value *getVectorSplat(Value *V, unsigned NumElements) {
-    V = IRB.CreateVectorSplat(NumElements, V, "vsplat");
+  Value *getVectorSplat(VectorType *VT, Value *V) {
+    V = IRB.CreateVectorSplat(VT->getElementCount(), V, "vsplat");
     DEBUG(dbgs() << "       splat: " << *V << "\n");
     return V;
   }
@@ -2653,8 +2653,10 @@ private:
       Value *Splat =
           getIntegerSplat(II.getValue(), DL.getTypeSizeInBits(ElementTy) / 8);
       Splat = convertValue(DL, IRB, Splat, ElementTy);
-      if (NumElements > 1)
-        Splat = getVectorSplat(Splat, NumElements);
+      if (NumElements > 1) {
+        VectorType *VT = VectorType::get(Splat->getType(), NumElements);
+        Splat = getVectorSplat(VT, Splat);
+      }
 
       Value *Old =
           IRB.CreateAlignedLoad(&NewAI, NewAI.getAlignment(), "oldload");
@@ -2686,7 +2688,7 @@ private:
 
       V = getIntegerSplat(II.getValue(), DL.getTypeSizeInBits(ScalarTy) / 8);
       if (VectorType *AllocaVecTy = dyn_cast<VectorType>(AllocaTy))
-        V = getVectorSplat(V, AllocaVecTy->getNumElements());
+        V = getVectorSplat(AllocaVecTy, V);
 
       V = convertValue(DL, IRB, V, AllocaTy);
     }

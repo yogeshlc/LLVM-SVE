@@ -52,8 +52,9 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemset(
   return SDValue();
 }
 bool AArch64SelectionDAGInfo::generateFMAsInMachineCombiner(
-    CodeGenOpt::Level OptLevel) const {
-  if (OptLevel >= CodeGenOpt::Aggressive)
+    SelectionDAG &DAG, CodeGenOpt::Level OptLevel) const {
+  const auto &STI = DAG.getMachineFunction().getSubtarget<AArch64Subtarget>();
+  if ((OptLevel >= CodeGenOpt::Aggressive) && !STI.hasSVE())
     return true;
   return false;
 }

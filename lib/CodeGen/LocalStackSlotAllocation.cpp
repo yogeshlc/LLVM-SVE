@@ -77,7 +77,7 @@ namespace {
     bool insertFrameReferenceRegisters(MachineFunction &Fn);
   public:
     static char ID; // Pass identification, replacement for typeid
-    explicit LocalStackSlotPass() : MachineFunctionPass(ID) { 
+    explicit LocalStackSlotPass() : MachineFunctionPass(ID) {
       initializeLocalStackSlotPassPass(*PassRegistry::getPassRegistry());
     }
     bool runOnMachineFunction(MachineFunction &MF) override;
@@ -208,6 +208,8 @@ void LocalStackSlotPass::calculateFrameObjectOffsets(MachineFunction &Fn) {
         continue;
       if (MFI->getStackProtectorIndex() == (int)i)
         continue;
+      if (MFI->getObjectRegion(i) != nullptr)
+        continue;
 
       switch (SP->getSSPLayout(MFI->getObjectAllocation(i))) {
       case StackProtector::SSPLK_None:
@@ -241,6 +243,8 @@ void LocalStackSlotPass::calculateFrameObjectOffsets(MachineFunction &Fn) {
     if (MFI->getStackProtectorIndex() == (int)i)
       continue;
     if (ProtectedObjs.count(i))
+      continue;
+    if (MFI->getObjectRegion(i) != nullptr)
       continue;
 
     AdjustStackOffset(MFI, i, Offset, StackGrowsDown, MaxAlign);
@@ -371,7 +375,7 @@ bool LocalStackSlotPass::insertFrameReferenceRegisters(MachineFunction &Fn) {
       Offset = FrameSizeAdjust + LocalOffset - BaseOffset;
     } else {
       // No previously defined register was in range, so create a // new one.
- 
+
       int64_t InstrOffset = TRI->getFrameIndexInstrOffset(MI, idx);
 
       int64_t PrevBaseOffset = BaseOffset;

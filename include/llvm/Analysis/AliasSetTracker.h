@@ -30,6 +30,7 @@ namespace llvm {
 class LoadInst;
 class StoreInst;
 class VAArgInst;
+class IntrinsicInst;
 class MemSetInst;
 class AliasSetTracker;
 class AliasSet;
@@ -188,6 +189,7 @@ public:
   iterator begin() const { return iterator(PtrList); }
   iterator end()   const { return iterator(); }
   bool empty() const { return PtrList == nullptr; }
+  unsigned getRefCount() const { return RefCount; }
 
   void print(raw_ostream &OS) const;
   void dump() const;
@@ -336,6 +338,7 @@ public:
   bool add(LoadInst *LI);
   bool add(StoreInst *SI);
   bool add(VAArgInst *VAAI);
+  bool add(IntrinsicInst *I, bool IsWrite);
   bool add(MemSetInst *MSI);
   bool add(Instruction *I);       // Dispatch to one of the other add methods...
   void add(BasicBlock &BB);       // Add all instructions in basic block

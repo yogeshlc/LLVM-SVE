@@ -606,7 +606,7 @@ bool LoopInterchangeLegality::areAllUsesReductions(Instruction *Ins, Loop *L) {
   return !std::any_of(Ins->user_begin(), Ins->user_end(), [=](User *U) -> bool {
     PHINode *UserIns = dyn_cast<PHINode>(U);
     RecurrenceDescriptor RD;
-    return !UserIns || !RecurrenceDescriptor::isReductionPHI(UserIns, L, RD);
+    return !UserIns || !RecurrenceDescriptor::isReductionPHI(UserIns, L, SE, RD);
   });
 }
 
@@ -709,7 +709,7 @@ bool LoopInterchangeLegality::findInductionAndReductions(
     PHINode *PHI = cast<PHINode>(I);
     if (InductionDescriptor::isInductionPHI(PHI, SE, ID))
       Inductions.push_back(PHI);
-    else if (RecurrenceDescriptor::isReductionPHI(PHI, L, RD))
+    else if (RecurrenceDescriptor::isReductionPHI(PHI, L, SE, RD))
       Reductions.push_back(PHI);
     else {
       DEBUG(

@@ -14117,7 +14117,7 @@ static SDValue LowerFABSorFNEG(SDValue Op, SelectionDAG &DAG) {
   APInt MaskElt =
     IsFABS ? APInt::getSignedMaxValue(EltBits) : APInt::getSignBit(EltBits);
   Constant *C = ConstantInt::get(*Context, MaskElt);
-  C = ConstantVector::getSplat(NumElts, C);
+  C = ConstantVector::getSplat({NumElts, false}, C);
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
   SDValue CPIdx = DAG.getConstantPool(C, TLI.getPointerTy(DAG.getDataLayout()));
   unsigned Alignment = cast<ConstantPoolSDNode>(CPIdx)->getAlignment();
@@ -21146,7 +21146,7 @@ static SDValue LowerMSCATTER(SDValue Op, const X86Subtarget &Subtarget,
   SDVTList VTs = DAG.getVTList(BitMaskVT, MVT::Other);
   SDValue Ops[] = {Chain, Src, Mask, BasePtr, Index};
   NewScatter = DAG.getMaskedScatter(VTs, N->getMemoryVT(), dl, Ops,
-                                    N->getMemOperand());
+                                    N->getMemOperand(), N->isTruncatingStore());
   DAG.ReplaceAllUsesWith(Op, SDValue(NewScatter.getNode(), 1));
   return SDValue(NewScatter.getNode(), 1);
 }
@@ -21270,7 +21270,8 @@ static SDValue LowerMGATHER(SDValue Op, const X86Subtarget &Subtarget,
     SDValue Ops[] = { N->getChain(), Src0, Mask, N->getBasePtr(), Index };
     SDValue NewGather = DAG.getMaskedGather(DAG.getVTList(NewVT, MVT::Other),
                                             N->getMemoryVT(), dl, Ops,
-                                            N->getMemOperand());
+                                            N->getMemOperand(),
+                                            N->getExtensionType());
     SDValue Exract = DAG.getNode(ISD::EXTRACT_SUBVECTOR, dl, VT,
                                  NewGather.getValue(0),
                                  DAG.getIntPtrConstant(0, dl));

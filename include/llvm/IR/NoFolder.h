@@ -283,6 +283,16 @@ public:
     return new ShuffleVectorInst(V1, V2, Mask);
   }
 
+  Instruction *CreateElementCount(Type* Ty, Constant *C) const {
+    return new ElementCountInst(Ty, C);
+  }
+
+  Instruction *CreateSeriesVector(VectorType::ElementCount EC, Constant *Start,
+                                  Constant* Step, bool HasNUW = false,
+                                  bool HasNSW = false) const {
+    return new SeriesVectorInst(Start, Step, EC);
+  }
+
   Instruction *CreateExtractValue(Constant *Agg,
                                   ArrayRef<unsigned> IdxList) const {
     return ExtractValueInst::Create(Agg, IdxList);

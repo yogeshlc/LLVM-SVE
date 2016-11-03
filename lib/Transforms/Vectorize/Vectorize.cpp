@@ -27,7 +27,10 @@ using namespace llvm;
 /// Vectorization library.
 void llvm::initializeVectorization(PassRegistry &Registry) {
   initializeBBVectorizePass(Registry);
+  initializeLoopVectorizationAnalysisPass(Registry);
   initializeLoopVectorizePass(Registry);
+  initializeBOSCCPass(Registry);
+  initializeSearchLoopVectorizePass(Registry);
   initializeSLPVectorizerPass(Registry);
 }
 
@@ -40,6 +43,10 @@ void LLVMAddBBVectorizePass(LLVMPassManagerRef PM) {
 }
 
 void LLVMAddLoopVectorizePass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createLoopVectorizePass());
+}
+
+void LLVMAddSearchLoopVectorizePass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createLoopVectorizePass());
 }
 

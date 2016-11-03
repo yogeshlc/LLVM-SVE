@@ -18,3 +18,43 @@ define i64 @test2(i64 %in) {
   ret i64 %r
 }
 
+; Extract of a vector GEP can be replaced by a scalar GEP
+define i8* @test3(i8* %ptr, i64 %index) #1 {
+  %sv = seriesvector i64 %index, 2 as <n x 16 x i64>
+  %gep = getelementptr i8, i8* %ptr, <n x 16 x i64> %sv
+  %r = extractelement <n x 16 x i8*> %gep, i32 0
+  ret i8* %r
+}
+
+define i8* @test4([16 x i8]* %ptr, i64 %index) {
+  %sv = seriesvector i64 %index, 2 as <n x 16 x i64>
+  %gep = getelementptr [16 x i8], [16 x i8]* %ptr, <n x 16 x i64> %sv, i64 2
+  %r = extractelement <n x 16 x i8*> %gep, i32 0
+  ret i8* %r
+}
+
+define i8* @test5([16 x i8]* %ptr, i64 %index) {
+  %sv = seriesvector i64 %index, 2 as <n x 16 x i64>
+  %gep = getelementptr [16 x i8], [16 x i8]* %ptr, i64 2, <n x 16 x i64> %sv
+  %r = extractelement <n x 16 x i8*> %gep, i32 0
+  ret i8* %r
+}
+
+define i8* @test6([16 x i8]* %ptr, i64 %index) {
+  %sv = seriesvector i64 %index, 2 as <n x 16 x i64>
+  %sv2 = seriesvector i64 %index, 3 as <n x 16 x i64>
+  %gep = getelementptr [16 x i8], [16 x i8]* %ptr, <n x 16 x i64> %sv, <n x 16 x i64> %sv2
+  %r = extractelement <n x 16 x i8*> %gep, i32 0
+  ret i8* %r
+}
+
+; All the above tests should not generate an extract - this one should, as it's
+; not safe to fold away %notsv
+; CHECK-LABEL: test7
+; CHECK: extractelement
+define i8* @test7([16 x i8]* %ptr, i64 %index, <n x 16 x i64> %notsv) {
+  %sv = seriesvector i64 %index, 2 as <n x 16 x i64>
+  %gep = getelementptr [16 x i8], [16 x i8]* %ptr, <n x 16 x i64> %sv, <n x 16 x i64> %notsv
+  %r = extractelement <n x 16 x i8*> %gep, i32 0
+  ret i8* %r
+}

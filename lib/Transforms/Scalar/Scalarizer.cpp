@@ -545,6 +545,10 @@ bool Scalarizer::visitShuffleVectorInst(ShuffleVectorInst &SVI) {
   if (!VT)
     return false;
 
+  SmallVector<int, 16> Mask;
+  if (!SVI.getShuffleMask(Mask))
+    return false;
+
   unsigned NumElems = VT->getNumElements();
   Scatterer Op0 = scatter(&SVI, SVI.getOperand(0));
   Scatterer Op1 = scatter(&SVI, SVI.getOperand(1));
@@ -552,7 +556,7 @@ bool Scalarizer::visitShuffleVectorInst(ShuffleVectorInst &SVI) {
   Res.resize(NumElems);
 
   for (unsigned I = 0; I < NumElems; ++I) {
-    int Selector = SVI.getMaskValue(I);
+    int Selector = Mask[I];
     if (Selector < 0)
       Res[I] = UndefValue::get(VT->getElementType());
     else if (unsigned(Selector) < Op0.size())

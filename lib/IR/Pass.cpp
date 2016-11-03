@@ -43,6 +43,10 @@ Pass *ModulePass::createPrinterPass(raw_ostream &O,
   return createPrintModulePass(O, Banner);
 }
 
+Pass *ModulePass::createBlamePass(const std::string &PassName) const {
+  return createBlameModulePass(PassName);
+}
+
 PassManagerType ModulePass::getPotentialPassManagerType() const {
   return PMT_ModulePassManager;
 }
@@ -142,6 +146,10 @@ Pass *FunctionPass::createPrinterPass(raw_ostream &O,
   return createPrintFunctionPass(O, Banner);
 }
 
+Pass *FunctionPass::createBlamePass(const std::string &PassName) const {
+  return createBlameFunctionPass(PassName);
+}
+
 PassManagerType FunctionPass::getPotentialPassManagerType() const {
   return PMT_FunctionPassManager;
 }
@@ -165,6 +173,12 @@ bool FunctionPass::skipFunction(const Function &F) const {
 Pass *BasicBlockPass::createPrinterPass(raw_ostream &O,
                                         const std::string &Banner) const {
   return createPrintBasicBlockPass(O, Banner);
+}
+
+Pass *BasicBlockPass::createBlamePass(const std::string &PassName) const {
+  // TODO: Implement. Haven't hit this yet.
+  assert(0);
+  return nullptr;
 }
 
 bool BasicBlockPass::doInitialization(Function &) {

@@ -27,6 +27,7 @@ add_llvm_library(LLVMScalarOpts
   LoopRerollPass.cpp
   LoopRotation.cpp
   LoopSimplifyCFG.cpp
+  LoopSpeculativeBoundsCheck.cpp
   LoopStrengthReduce.cpp
   LoopUnrollPass.cpp
   LoopUnswitch.cpp
@@ -48,6 +49,7 @@ add_llvm_library(LLVMScalarOpts
   ScalarReplAggregates.cpp
   Scalarizer.cpp
   SeparateConstOffsetFromGEP.cpp
+  SeparateInvariantsFromGepOffset.cpp
   SimplifyCFGPass.cpp
   Sink.cpp
   SpeculativeExecution.cpp

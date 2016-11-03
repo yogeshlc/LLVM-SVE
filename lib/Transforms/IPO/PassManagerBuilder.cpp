@@ -45,6 +45,14 @@ RunLoopVectorization("vectorize-loops", cl::Hidden,
                      cl::desc("Run the Loop vectorization passes"));
 
 static cl::opt<bool>
+RunSearchLoopVectorization("vectorize-search-loops", cl::init(false), cl::Hidden,
+                           cl::desc("Run search loop vectorizer"));
+
+static cl::opt<bool>
+BOSCC("insert-superword-control-flow", cl::init(false), cl::Hidden,
+      cl::desc("Run the 'Branch On Superword Condition Codes' (BOSCC) pass."));
+
+static cl::opt<bool>
 RunSLPVectorization("vectorize-slp", cl::Hidden,
                     cl::desc("Run the SLP vectorization passes"));
 
@@ -118,6 +126,10 @@ static cl::opt<bool> UseLoopVersioningLICM(
     "enable-loop-versioning-licm", cl::init(false), cl::Hidden,
     cl::desc("Enable the experimental Loop Versioning LICM pass"));
 
+static cl::opt<bool> UseLoopSpeculativeBoundsChecking(
+    "enable-loop-speculative-bounds-checking", cl::init(true), cl::Hidden,
+    cl::desc("Enable experimental loop speculative bounds checking pass"));
+
 PassManagerBuilder::PassManagerBuilder() {
     OptLevel = 2;
     SizeLevel = 0;
@@ -129,6 +141,7 @@ PassManagerBuilder::PassManagerBuilder() {
     BBVectorize = RunBBVectorization;
     SLPVectorize = RunSLPVectorization;
     LoopVectorize = RunLoopVectorization;
+    SearchLoopVectorize = RunSearchLoopVectorization;
     RerollLoops = RunLoopRerolling;
     LoadCombine = RunLoadCombine;
     DisableGVNLoadPRE = false;
@@ -475,7 +488,17 @@ void PassManagerBuilder::populateModulePassManager(
   // llvm.loop.distribute=true or when -enable-loop-distribute is specified.
   MPM.add(createLoopDistributePass(/*ProcessAllLoopsByDefault=*/false));
 
+  // TODO: Decide if this is the best place to run this pass....
+  if (UseLoopSpeculativeBoundsChecking)
+    MPM.add(createLoopSpeculativeBoundsCheckPass());
+
   MPM.add(createLoopVectorizePass(DisableUnrollLoops, LoopVectorize));
+
+  if (SearchLoopVectorize)
+    MPM.add(createSearchLoopVectorizePass(DisableUnrollLoops, LoopVectorize));
+
+  if (BOSCC)
+    MPM.add(createBOSCCPass());
 
   // Eliminate loads by forwarding stores from the previous iteration to loads
   // of the current iteration.
@@ -529,6 +552,7 @@ void PassManagerBuilder::populateModulePassManager(
 
   addExtensionsToPM(EP_Peephole, MPM);
   MPM.add(createCFGSimplificationPass());
+  MPM.add(createSeparateInvariantsFromGepOffsetPass());
   addInstructionCombiningPass(MPM);
 
   if (!DisableUnrollLoops) {

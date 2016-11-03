@@ -174,6 +174,7 @@ public:
   RetTy visitCatchSwitchInst(CatchSwitchInst &I)  { DELEGATE(TerminatorInst);}
   RetTy visitICmpInst(ICmpInst &I)                { DELEGATE(CmpInst);}
   RetTy visitFCmpInst(FCmpInst &I)                { DELEGATE(CmpInst);}
+  RetTy visitTestInst(TestInst &I)                { DELEGATE(UnaryInstruction);}
   RetTy visitAllocaInst(AllocaInst &I)            { DELEGATE(UnaryInstruction);}
   RetTy visitLoadInst(LoadInst     &I)            { DELEGATE(UnaryInstruction);}
   RetTy visitStoreInst(StoreInst   &I)            { DELEGATE(Instruction);}
@@ -200,12 +201,16 @@ public:
   RetTy visitExtractElementInst(ExtractElementInst &I) { DELEGATE(Instruction);}
   RetTy visitInsertElementInst(InsertElementInst &I) { DELEGATE(Instruction);}
   RetTy visitShuffleVectorInst(ShuffleVectorInst &I) { DELEGATE(Instruction);}
+  RetTy visitElementCountInst(ElementCountInst &I){ DELEGATE(Instruction);}
+  RetTy visitSeriesVectorInst(SeriesVectorInst &I){ DELEGATE(Instruction);}
   RetTy visitExtractValueInst(ExtractValueInst &I){ DELEGATE(UnaryInstruction);}
   RetTy visitInsertValueInst(InsertValueInst &I)  { DELEGATE(Instruction); }
   RetTy visitLandingPadInst(LandingPadInst &I)    { DELEGATE(Instruction); }
   RetTy visitFuncletPadInst(FuncletPadInst &I) { DELEGATE(Instruction); }
   RetTy visitCleanupPadInst(CleanupPadInst &I) { DELEGATE(FuncletPadInst); }
   RetTy visitCatchPadInst(CatchPadInst &I)     { DELEGATE(FuncletPadInst); }
+
+  RetTy visitPropFFInst(PropFFInst &I)            { DELEGATE(Instruction); }
 
   // Handle the special instrinsic instruction classes.
   RetTy visitDbgDeclareInst(DbgDeclareInst &I)    { DELEGATE(DbgInfoIntrinsic);}

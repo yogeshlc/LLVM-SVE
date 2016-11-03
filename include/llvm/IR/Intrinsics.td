@@ -122,10 +122,24 @@ class LLVMVectorSameWidth<int num, LLVMType elty>
 }
 class LLVMPointerTo<int num> : LLVMMatchType<num>;
 class LLVMVectorOfPointersToElt<int num> : LLVMMatchType<num>;
+class LLVMVectorElementType<int num> : LLVMMatchType<num>;
 
 // Match the type of another intrinsic parameter that is expected to be a
-// vector type, but change the element count to be half as many
+// vector type, but change the element count to be half as many.
 class LLVMHalfElementsVectorType<int num> : LLVMMatchType<num>;
+
+// Match the type of another intrinsic parameter that is expected to be a
+// vector type, but change the element count to be twice as many.
+class LLVMDoubleElementsVectorType<int num> : LLVMMatchType<num>;
+
+// Match the type of another intrinsic parameter that is expected to be based on
+// an integral type (i.e. <N x iM>), but change the scalar size to
+// be half as wide as the other type and have twice the number of elements.
+class LLVMUnpackType<int num> : LLVMMatchType<num>;
+
+// Match the element count and bit width of another intrinsic parameter, but
+// change the element type to an integer.
+class LLVMVectorOfBitcastsToInt<int num> : LLVMMatchType<num>;
 
 def llvm_void_ty       : LLVMType<isVoid>;
 def llvm_any_ty        : LLVMType<Any>;
@@ -393,6 +407,26 @@ let IntrProperties = [IntrNoMem] in {
   def int_round : Intrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>]>;
   def int_canonicalize : Intrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>],
                                    [IntrNoMem]>;
+
+  // Masked vector versions of the above functions.
+  def int_masked_sin  : Intrinsic<[llvm_anyvector_ty],
+                                  [LLVMVectorSameWidth<0, llvm_i1_ty>,
+                                   LLVMMatchType<0>]>;
+  def int_masked_cos  : Intrinsic<[llvm_anyvector_ty],
+                                  [LLVMVectorSameWidth<0, llvm_i1_ty>,
+                                   LLVMMatchType<0>]>;
+  def int_masked_powi  : Intrinsic<[llvm_anyvector_ty],
+                                   [LLVMVectorSameWidth<0, llvm_i1_ty>,
+                                    LLVMMatchType<0>, llvm_anyvector_ty]>;
+  def int_masked_pow  : Intrinsic<[llvm_anyvector_ty],
+                                  [LLVMVectorSameWidth<0, llvm_i1_ty>,
+                                   LLVMMatchType<0>, LLVMMatchType<0>]>;
+  def int_masked_exp  : Intrinsic<[llvm_anyvector_ty],
+                                  [LLVMVectorSameWidth<0, llvm_i1_ty>,
+                                   LLVMMatchType<0>]>;
+  def int_masked_log  : Intrinsic<[llvm_anyvector_ty],
+                                  [LLVMVectorSameWidth<0, llvm_i1_ty>,
+                                   LLVMMatchType<0>]>;
 }
 
 def int_minnum : Intrinsic<[llvm_anyfloat_ty],
@@ -425,6 +459,7 @@ def int_expect : Intrinsic<[llvm_anyint_ty], [LLVMMatchType<0>,
 let IntrProperties = [IntrNoMem] in {
   def int_bswap: Intrinsic<[llvm_anyint_ty], [LLVMMatchType<0>]>;
   def int_ctpop: Intrinsic<[llvm_anyint_ty], [LLVMMatchType<0>]>;
+  def int_ctvpop : Intrinsic<[llvm_i64_ty], [llvm_anyvector_ty], [], "llvm.ctvpop">;
   def int_ctlz : Intrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, llvm_i1_ty]>;
   def int_cttz : Intrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, llvm_i1_ty]>;
   def int_bitreverse : Intrinsic<[llvm_anyint_ty], [LLVMMatchType<0>]>;
@@ -650,6 +685,13 @@ def int_masked_load  : Intrinsic<[llvm_anyvector_ty],
                                  [LLVMPointerTo<0>, llvm_i32_ty,
                                   LLVMVectorSameWidth<0, llvm_i1_ty>, LLVMMatchType<0>],
                                  [IntrReadMem, IntrArgMemOnly]>;
+
+def int_masked_spec_load : Intrinsic<[llvm_anyvector_ty,
+                                      LLVMVectorSameWidth<0, llvm_i1_ty>],
+                                     [LLVMPointerTo<0>, llvm_i32_ty,
+                                      LLVMVectorSameWidth<0, llvm_i1_ty>,
+                                      LLVMMatchType<0>],
+                                     [IntrReadMem, IntrArgMemOnly]>;
 
 def int_masked_gather: Intrinsic<[llvm_anyvector_ty],
                                  [LLVMVectorOfPointersToElt<0>, llvm_i32_ty,

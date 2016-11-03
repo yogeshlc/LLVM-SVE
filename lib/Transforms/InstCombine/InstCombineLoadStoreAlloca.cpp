@@ -474,6 +474,7 @@ static Instruction *combineLoadToOperationType(InstCombiner &IC, LoadInst &LI) {
   // is sized and has a size exactly the same as its store size and the store
   // size is a legal integer type.
   if (!Ty->isIntegerTy() && Ty->isSized() &&
+      DL.isTypeStoreSizeKnown(Ty) &&
       DL.isLegalInteger(DL.getTypeStoreSizeInBits(Ty)) &&
       DL.getTypeStoreSizeInBits(Ty) == DL.getTypeSizeInBits(Ty)) {
     if (std::all_of(LI.user_begin(), LI.user_end(), [&LI](User *U) {

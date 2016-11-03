@@ -73,6 +73,10 @@ private:
   Pass *createPrinterPass(raw_ostream &O,
                           const std::string &Banner) const override;
 
+  /// createBlamePass - Get a pass that tags all untagged instructions
+  /// with the name of the pass that created them.
+  Pass *createBlamePass(const std::string &PassName) const override;
+
   bool runOnFunction(Function &F) override;
 };
 

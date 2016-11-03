@@ -946,6 +946,12 @@ Constant *ConstantFoldInstOperandsImpl(const Value *InstOrCE, Type *DestTy,
     return ConstantExpr::getInsertElement(Ops[0], Ops[1], Ops[2]);
   case Instruction::ShuffleVector:
     return ConstantExpr::getShuffleVector(Ops[0], Ops[1], Ops[2]);
+  case Instruction::ElementCount:
+    return ConstantExpr::getElementCount(DestTy, Ops[0]);
+  case Instruction::SeriesVector:
+    return ConstantExpr::getSeriesVector(
+                                    cast<VectorType>(DestTy)->getElementCount(),
+                                    Ops[0], Ops[1]);
   }
 }
 

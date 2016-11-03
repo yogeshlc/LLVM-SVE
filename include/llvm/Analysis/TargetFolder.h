@@ -263,6 +263,12 @@ public:
                               ArrayRef<unsigned> IdxList) const {
     return Fold(ConstantExpr::getInsertValue(Agg, Val, IdxList));
   }
+
+  Constant *CreateSeriesVector(VectorType::ElementCount EC,
+                               Constant *Start, Constant* Step,
+                               bool HasNUW = false, bool HasNSW = false) const {
+    return Fold(ConstantExpr::getSeriesVector(EC, Start, Step, HasNUW, HasNSW));
+  }
 };
 
 }

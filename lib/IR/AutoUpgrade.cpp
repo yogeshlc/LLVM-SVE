@@ -318,7 +318,6 @@ static Value *UpgradeX86PSLLDQIntrinsics(IRBuilder<> &Builder, LLVMContext &C,
   Type *ResultTy = Op->getType();
   unsigned NumElts = ResultTy->getVectorNumElements() * 8;
 
-  // Bitcast from a 64-bit element type to a byte element type.
   Type *VecTy = VectorType::get(Type::getInt8Ty(C), NumElts);
   Op = Builder.CreateBitCast(Op, VecTy, "cast");
 
@@ -643,8 +642,8 @@ void llvm::UpgradeIntrinsicCall(CallInst *CI, Function *NewFn) {
       Value *Arg0 = CI->getArgOperand(0);
       Value *Arg1 = CI->getArgOperand(1);
       Value *Sel = CI->getArgOperand(2);
-      unsigned NumElts = CI->getType()->getVectorNumElements();
-      Constant *MinusOne = ConstantVector::getSplat(NumElts, Builder.getInt64(-1));
+      auto EC = cast<VectorType>(CI->getType())->getElementCount();
+      Constant *MinusOne = ConstantVector::getSplat(EC, Builder.getInt64(-1));
       Value *NotSel = Builder.CreateXor(Sel, MinusOne);
       Value *Sel0 = Builder.CreateAnd(Arg0, Sel);
       Value *Sel1 = Builder.CreateAnd(Arg1, NotSel);

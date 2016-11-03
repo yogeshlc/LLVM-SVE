@@ -280,6 +280,9 @@ ScanOperands:
         continue;
 
       EVT OpVT = N->getOperand(i).getValueType();
+      if (N->getOpcode() == ISD::ELEMENT_COUNT)
+        OpVT = cast<VTSDNode>(N->getOperand(i))->getVT();
+
       switch (getTypeAction(OpVT)) {
       case TargetLowering::TypeLegal:
         continue;
@@ -876,6 +879,8 @@ void DAGTypeLegalizer::SetSplitVector(SDValue Op, SDValue Lo,
          Op.getValueType().getVectorElementType() &&
          2*Lo.getValueType().getVectorNumElements() ==
          Op.getValueType().getVectorNumElements() &&
+         Op.getValueType().isScalableVector() ==
+         Lo.getValueType().isScalableVector() &&
          Hi.getValueType() == Lo.getValueType() &&
          "Invalid type for split vector");
   // Lo/Hi may have been newly allocated, if so, add nodeid's as relevant.

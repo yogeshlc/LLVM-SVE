@@ -512,6 +512,10 @@ private:
   void visitAllocaInst    (Instruction &I) { markOverdefined(&I); }
   void visitVAArgInst     (Instruction &I) { markAnythingOverdefined(&I); }
 
+  void visitSeriesVectorInst(Instruction &I) { markAnythingOverdefined(&I); }
+  void visitPropFFInst(Instruction &I) { markAnythingOverdefined(&I); }
+  void visitTestInst(Instruction &I) { markAnythingOverdefined(&I); }
+
   void visitInstruction(Instruction &I) {
     // If a new instruction is added to LLVM that we don't handle.
     dbgs() << "SCCP: Don't know how to handle: " << I << '\n';

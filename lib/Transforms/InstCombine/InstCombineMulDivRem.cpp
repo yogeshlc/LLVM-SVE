@@ -434,6 +434,8 @@ static void detectLog2OfHalf(Value *&Op, Value *&Y, IntrinsicInst *&Log2) {
 
 static bool isFiniteNonZeroFp(Constant *C) {
   if (C->getType()->isVectorTy()) {
+    assert(!cast<VectorType>(C->getType())->isScalable() &&
+           "Does not support scalable vectors.");
     for (unsigned I = 0, E = C->getType()->getVectorNumElements(); I != E;
          ++I) {
       ConstantFP *CFP = dyn_cast_or_null<ConstantFP>(C->getAggregateElement(I));
@@ -449,6 +451,8 @@ static bool isFiniteNonZeroFp(Constant *C) {
 
 static bool isNormalFp(Constant *C) {
   if (C->getType()->isVectorTy()) {
+    assert(!cast<VectorType>(C->getType())->isScalable() &&
+           "Does not support scalable vectors.");
     for (unsigned I = 0, E = C->getType()->getVectorNumElements(); I != E;
          ++I) {
       ConstantFP *CFP = dyn_cast_or_null<ConstantFP>(C->getAggregateElement(I));
@@ -469,6 +473,10 @@ static bool isFMulOrFDivWithConstant(Value *V) {
   if (!I || (I->getOpcode() != Instruction::FMul &&
              I->getOpcode() != Instruction::FDiv))
     return false;
+
+  if (auto *VTy = dyn_cast<VectorType>(V->getType()))
+    if (VTy->isScalable())
+      return false;
 
   Constant *C0 = dyn_cast<Constant>(I->getOperand(0));
   Constant *C1 = dyn_cast<Constant>(I->getOperand(1));
@@ -547,6 +555,10 @@ Instruction *InstCombiner::visitFMul(BinaryOperator &I) {
   if (Value *V =
           SimplifyFMulInst(Op0, Op1, I.getFastMathFlags(), DL, TLI, DT, AC))
     return replaceInstUsesWith(I, V);
+
+  if (auto *VTy = dyn_cast<VectorType>(I.getType()))
+    if (VTy->isScalable())
+      return nullptr;
 
   bool AllowReassociate = I.hasUnsafeAlgebra();
 
@@ -1238,6 +1250,10 @@ Instruction *InstCombiner::visitFDiv(BinaryOperator &I) {
     if (SelectInst *SI = dyn_cast<SelectInst>(Op1))
       if (Instruction *R = FoldOpIntoSelect(I, SI))
         return R;
+
+  if (auto *VTy = dyn_cast<VectorType>(I.getType()))
+    if (VTy->isScalable())
+      return nullptr;
 
   bool AllowReassociate = I.hasUnsafeAlgebra();
   bool AllowReciprocal = I.hasAllowReciprocal();

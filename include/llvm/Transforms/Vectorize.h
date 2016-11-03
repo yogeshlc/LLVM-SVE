@@ -122,9 +122,22 @@ Pass *createLoopVectorizePass(bool NoUnrolling = false,
 
 //===----------------------------------------------------------------------===//
 //
+// SearchLoopVectorize - Create a search loop vectorization pass.
+//
+Pass *createSearchLoopVectorizePass(bool NoUnrolling = false,
+                                    bool AlwaysVectorize = true);
+
+//===----------------------------------------------------------------------===//
+//
 // SLPVectorizer - Create a bottom-up SLP vectorizer pass.
 //
 Pass *createSLPVectorizerPass();
+
+//===----------------------------------------------------------------------===//
+//
+// BOSCC - Create a BOSCC post vectorizer pass.
+//
+Pass *createBOSCCPass();
 
 //===----------------------------------------------------------------------===//
 /// @brief Vectorize the BasicBlock.

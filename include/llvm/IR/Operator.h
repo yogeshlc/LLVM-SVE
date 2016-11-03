@@ -79,6 +79,7 @@ public:
   };
 
 private:
+  friend class SeriesVectorInst;
   friend class Instruction;
   friend class ConstantExpr;
   void setHasNoUnsignedWrap(bool B) {
@@ -107,13 +108,15 @@ public:
     return I->getOpcode() == Instruction::Add ||
            I->getOpcode() == Instruction::Sub ||
            I->getOpcode() == Instruction::Mul ||
-           I->getOpcode() == Instruction::Shl;
+           I->getOpcode() == Instruction::Shl ||
+           I->getOpcode() == Instruction::SeriesVector;
   }
   static inline bool classof(const ConstantExpr *CE) {
     return CE->getOpcode() == Instruction::Add ||
            CE->getOpcode() == Instruction::Sub ||
            CE->getOpcode() == Instruction::Mul ||
-           CE->getOpcode() == Instruction::Shl;
+           CE->getOpcode() == Instruction::Shl ||
+           CE->getOpcode() == Instruction::SeriesVector;
   }
   static inline bool classof(const Value *V) {
     return (isa<Instruction>(V) && classof(cast<Instruction>(V))) ||

@@ -707,7 +707,7 @@ Type *DataLayout::getIntPtrType(Type *Ty) const {
   unsigned NumBits = getPointerTypeSizeInBits(Ty);
   IntegerType *IntTy = IntegerType::get(Ty->getContext(), NumBits);
   if (VectorType *VecTy = dyn_cast<VectorType>(Ty))
-    return VectorType::get(IntTy, VecTy->getNumElements());
+    return VectorType::get(IntTy, VecTy->getElementCount());
   return IntTy;
 }
 

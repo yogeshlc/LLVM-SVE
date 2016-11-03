@@ -484,7 +484,7 @@ private:
 
 public:
   /// Return a ConstantVector with the specified constant in each element.
-  static Constant *getSplat(unsigned NumElts, Constant *Elt);
+  static Constant *getSplat(VectorType::ElementCount EC, Constant *Elt);
 
   /// Specialize the getType() method to always return a VectorType,
   /// which reduces the amount of casting needed in parts of the compiler.
@@ -1118,6 +1118,12 @@ public:
                                     Type *OnlyIfReducedTy = nullptr);
   static Constant *getShuffleVector(Constant *V1, Constant *V2, Constant *Mask,
                                     Type *OnlyIfReducedTy = nullptr);
+  static Constant *getElementCount(Type* Ty, Constant *C,
+                                  Type *OnlyIfReducedTy = nullptr);
+  static Constant *getSeriesVector(VectorType::ElementCount EC,
+                                   Constant *Start, Constant* Step,
+                                   bool HasNUW = false, bool HasNSW = false,
+                                   Type *OnlyIfReducedTy = nullptr);
   static Constant *getExtractValue(Constant *Agg, ArrayRef<unsigned> Idxs,
                                    Type *OnlyIfReducedTy = nullptr);
   static Constant *getInsertValue(Constant *Agg, Constant *Val,

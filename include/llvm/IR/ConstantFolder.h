@@ -229,6 +229,16 @@ public:
     return ConstantExpr::getShuffleVector(V1, V2, Mask);
   }
 
+  Constant *CreateElementCount(Type* Ty, Constant *C) const {
+    return ConstantExpr::getElementCount(Ty, C);
+  }
+
+  Constant *CreateSeriesVector(VectorType::ElementCount EC,
+                               Constant *Start, Constant* Step,
+                               bool HasNUW = false, bool HasNSW = false) const {
+    return ConstantExpr::getSeriesVector(EC, Start, Step, HasNUW, HasNSW);
+  }
+
   Constant *CreateExtractValue(Constant *Agg,
                                ArrayRef<unsigned> IdxList) const {
     return ConstantExpr::getExtractValue(Agg, IdxList);

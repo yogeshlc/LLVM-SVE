@@ -79,18 +79,60 @@ bool llvm::hasVectorInstrinsicScalarOpd(Intrinsic::ID ID,
   }
 }
 
+/// \brief If the given vector intrinsic ID has another version which has a
+/// mask input, then return it.
+static Intrinsic::ID getMaskedVectorIntrinsic(Intrinsic::ID ID) {
+  switch (ID) {
+    case Intrinsic::sin:
+      return Intrinsic::masked_sin;
+    case Intrinsic::cos:
+      return Intrinsic::masked_cos;
+    case Intrinsic::exp:
+      return Intrinsic::masked_exp;
+    case Intrinsic::log:
+      return Intrinsic::masked_log;
+    case Intrinsic::powi:
+      return Intrinsic::masked_powi;
+    case Intrinsic::pow:
+      return Intrinsic::masked_pow;
+    default:
+      return Intrinsic::not_intrinsic;
+  }
+}
+
+/// \brief Returns true if the given vector intrinsic is maskable.
+bool llvm::isMaskedVectorIntrinsic(Intrinsic::ID ID) {
+  switch (ID) {
+    case Intrinsic::masked_sin:
+    case Intrinsic::masked_cos:
+    case Intrinsic::masked_exp:
+    case Intrinsic::masked_log:
+    case Intrinsic::masked_powi:
+    case Intrinsic::masked_pow:
+      return true;
+    default:
+      return false;
+  }
+}
+
 /// \brief Returns intrinsic ID for call.
 /// For the input call instruction it finds mapping intrinsic and returns
 /// its ID, in case it does not found it return not_intrinsic.
+/// If UseMask is true, then find a masking vectorized function if available.
 Intrinsic::ID llvm::getVectorIntrinsicIDForCall(const CallInst *CI,
-                                                const TargetLibraryInfo *TLI) {
+                                                const TargetLibraryInfo *TLI,
+                                                bool UseMask) {
   Intrinsic::ID ID = getIntrinsicForCallSite(CI, TLI);
   if (ID == Intrinsic::not_intrinsic)
     return Intrinsic::not_intrinsic;
 
   if (isTriviallyVectorizable(ID) || ID == Intrinsic::lifetime_start ||
-      ID == Intrinsic::lifetime_end || ID == Intrinsic::assume)
+      ID == Intrinsic::lifetime_end || ID == Intrinsic::assume) {
+    Intrinsic::ID MaskedIntr = getMaskedVectorIntrinsic(ID);
+    if (UseMask && MaskedIntr != Intrinsic::not_intrinsic)
+      return MaskedIntr;
     return ID;
+  }
   return Intrinsic::not_intrinsic;
 }
 
@@ -234,7 +276,10 @@ Value *llvm::findScalarElement(Value *V, unsigned EltNo) {
   assert(V->getType()->isVectorTy() && "Not looking at a vector?");
   VectorType *VTy = cast<VectorType>(V->getType());
   unsigned Width = VTy->getNumElements();
-  if (EltNo >= Width)  // Out of range access.
+
+  // Out of range access for fixed-width vectors. Scalable vectors can accept
+  // any index.
+  if ((EltNo >= Width) && !VTy->isScalable())
     return UndefValue::get(VTy->getElementType());
 
   if (Constant *C = dyn_cast<Constant>(V))
@@ -257,13 +302,15 @@ Value *llvm::findScalarElement(Value *V, unsigned EltNo) {
   }
 
   if (ShuffleVectorInst *SVI = dyn_cast<ShuffleVectorInst>(V)) {
-    unsigned LHSWidth = SVI->getOperand(0)->getType()->getVectorNumElements();
-    int InEl = SVI->getMaskValue(EltNo);
-    if (InEl < 0)
-      return UndefValue::get(VTy->getElementType());
-    if (InEl < (int)LHSWidth)
-      return findScalarElement(SVI->getOperand(0), InEl);
-    return findScalarElement(SVI->getOperand(1), InEl - LHSWidth);
+    int InEl;
+    if (SVI->getMaskValue(EltNo, InEl)) {
+      unsigned LHSWidth = SVI->getOperand(0)->getType()->getVectorNumElements();
+      if (InEl < 0)
+        return UndefValue::get(VTy->getElementType());
+      if (InEl < (int)LHSWidth)
+        return findScalarElement(SVI->getOperand(0), InEl);
+      return findScalarElement(SVI->getOperand(1), InEl - LHSWidth);
+    }
   }
 
   // Extract a value from a vector add operation with a constant zero.
@@ -292,7 +339,10 @@ const llvm::Value *llvm::getSplatValue(const Value *V) {
   if (!ShuffleInst)
     return nullptr;
   // All-zero (or undef) shuffle mask elements.
-  for (int MaskElt : ShuffleInst->getShuffleMask())
+  SmallVector<int, 16> Mask;
+  if (!ShuffleInst->getShuffleMask(Mask))
+    return nullptr;
+  for (int MaskElt : Mask)
     if (MaskElt != 0 && MaskElt != -1)
       return nullptr;
   // The first shuffle source is 'insertelement' with index 0.

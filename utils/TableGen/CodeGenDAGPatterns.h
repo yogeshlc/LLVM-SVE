@@ -401,7 +401,7 @@ public:
   }
 
   bool hasAnyPredicate() const { return !PredicateFns.empty(); }
-  
+
   const std::vector<TreePredicateFn> &getPredicateFns() const {
     return PredicateFns;
   }

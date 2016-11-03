@@ -58,6 +58,7 @@ protected:
   bool HasPerfMon = false;
   bool HasFullFP16 = false;
   bool HasSPE = false;
+  bool HasSVE = false;
 
   // HasZeroCycleRegMove - Has zero-cycle register mov instructions.
   bool HasZeroCycleRegMove = false;
@@ -194,6 +195,7 @@ public:
     return MaxPrefetchIterationsAhead;
   }
 
+  bool hasSVE() const { return HasSVE; }
   /// CPU has TBI (top byte of addresses is ignored during HW address
   /// translation) and OS enables it.
   bool supportsAddressTopByteIgnored() const;

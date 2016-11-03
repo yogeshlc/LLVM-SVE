@@ -70,6 +70,9 @@ public:
   bool enableInterleavedAccessVectorization();
   unsigned getNumberOfRegisters(bool Vector);
   unsigned getRegisterBitWidth(bool Vector);
+  unsigned getRegisterBitWidthUpperBound(bool Vector) {
+    return getRegisterBitWidth(Vector);
+  }
   unsigned getCacheLineSize();
   unsigned getPrefetchDistance();
   unsigned getMaxInterleaveFactor(unsigned VF);

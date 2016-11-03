@@ -90,7 +90,8 @@ namespace Intrinsic {
       Void, VarArg, MMX, Token, Metadata, Half, Float, Double,
       Integer, Vector, Pointer, Struct,
       Argument, ExtendArgument, TruncArgument, HalfVecArgument,
-      SameVecWidthArgument, PtrToArgument, VecOfPtrsToElt
+      SameVecWidthArgument, PtrToArgument, VecOfBitcastsToInt, VecOfPtrsToElt,
+      ScalableVecArgument, VecElementArgument, DoubleVecArgument, UnpackArgument
     } Kind;
 
     union {
@@ -113,14 +114,18 @@ namespace Intrinsic {
       assert(Kind == Argument || Kind == ExtendArgument ||
              Kind == TruncArgument || Kind == HalfVecArgument ||
              Kind == SameVecWidthArgument || Kind == PtrToArgument ||
-             Kind == VecOfPtrsToElt);
+             Kind == VecOfBitcastsToInt || Kind == VecOfPtrsToElt ||
+             Kind == VecElementArgument || Kind == DoubleVecArgument ||
+             Kind == UnpackArgument);
       return Argument_Info >> 3;
     }
     ArgKind getArgumentKind() const {
       assert(Kind == Argument || Kind == ExtendArgument ||
              Kind == TruncArgument || Kind == HalfVecArgument ||
              Kind == SameVecWidthArgument || Kind == PtrToArgument ||
-             Kind == VecOfPtrsToElt);
+             Kind == VecOfBitcastsToInt || Kind == VecOfPtrsToElt ||
+             Kind == VecElementArgument || Kind == DoubleVecArgument ||
+             Kind == UnpackArgument);
       return (ArgKind)(Argument_Info & 7);
     }
 

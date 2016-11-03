@@ -75,6 +75,16 @@ PrintAfter("print-after",
            llvm::cl::desc("Print IR after specified passes"),
            cl::Hidden);
 
+static cl::opt<std::string>
+PrintBeforePass("print-before-pass",
+                llvm::cl::desc("Print IR before specified pass"),
+                cl::Hidden);
+
+static cl::opt<std::string>
+PrintAfterPass("print-after-pass",
+               llvm::cl::desc("Print IR after specified pass"),
+               cl::Hidden);
+
 static cl::opt<bool>
 PrintBeforeAll("print-before-all",
                llvm::cl::desc("Print IR before each pass"),
@@ -90,6 +100,11 @@ static cl::list<std::string>
                             "match this for all print-[before|after][-all] "
                             "options"),
                    cl::CommaSeparated);
+
+static cl::opt<bool>
+BlameAfterAll("blame-after-all",
+              llvm::cl::desc("Tag each instruction with the name of the pass which created it"),
+              cl::init(false));
 
 /// This is a helper to determine whether to print IR before or
 /// after a pass.
@@ -108,13 +123,21 @@ static bool ShouldPrintBeforeOrAfterPass(const PassInfo *PI,
 /// This is a utility to check whether a pass should have IR dumped
 /// before it.
 static bool ShouldPrintBeforePass(const PassInfo *PI) {
-  return PrintBeforeAll || ShouldPrintBeforeOrAfterPass(PI, PrintBefore);
+  return PrintBeforeAll || ShouldPrintBeforeOrAfterPass(PI, PrintBefore) ||
+         (PrintBeforePass == PI->getPassArgument());
 }
 
 /// This is a utility to check whether a pass should have IR dumped
 /// after it.
 static bool ShouldPrintAfterPass(const PassInfo *PI) {
-  return PrintAfterAll || ShouldPrintBeforeOrAfterPass(PI, PrintAfter);
+  return PrintAfterAll || ShouldPrintBeforeOrAfterPass(PI, PrintAfter) ||
+         (PrintAfterPass == PI->getPassArgument());
+}
+
+// This is a utility to check whether instructions should be tagged after
+// a pass created them
+static bool ShouldBlameAfterPass(const PassInfo *PI) {
+    return BlameAfterAll;
 }
 
 bool llvm::isFunctionInPrintList(StringRef FunctionName) {
@@ -122,6 +145,7 @@ bool llvm::isFunctionInPrintList(StringRef FunctionName) {
                                                         PrintFuncsList.end());
   return PrintFuncNames.empty() || PrintFuncNames.count(FunctionName);
 }
+
 /// isPassDebuggingExecutionsOrMore - Return true if -debug-pass=Executions
 /// or higher is specified.
 bool PMDataManager::isPassDebuggingExecutionsOrMore() const {
@@ -250,6 +274,11 @@ public:
     return createPrintFunctionPass(O, Banner);
   }
 
+  /// createBlamePass - Get a function blame pass.
+  Pass *createBlamePass(const std::string &PassName) const override {
+    return createBlameFunctionPass(PassName);
+  }
+
   // Prepare for running an on the fly pass, freeing memory if needed
   // from a previous run.
   void releaseMemoryOnTheFly();
@@ -316,6 +345,11 @@ public:
   Pass *createPrinterPass(raw_ostream &O,
                           const std::string &Banner) const override {
     return createPrintModulePass(O, Banner);
+  }
+
+  /// createBlamePass - Get a module blame pass.
+  Pass *createBlamePass(const std::string &PassName) const override {
+    return createBlameModulePass(PassName);
   }
 
   /// run - Execute all of the passes scheduled for execution.  Keep track of
@@ -406,6 +440,11 @@ public:
   Pass *createPrinterPass(raw_ostream &O,
                           const std::string &Banner) const override {
     return createPrintModulePass(O, Banner);
+  }
+
+  /// createBlamePass - Get a module blame pass.
+  Pass *createBlamePass(const std::string &PassName) const override {
+    return createBlameModulePass(PassName);
   }
 
   /// run - Execute all of the passes scheduled for execution.  Keep track of
@@ -690,6 +729,11 @@ void PMTopLevelManager::schedulePass(Pass *P) {
 
   // Add the requested pass to the best available pass manager.
   P->assignPassManager(activeStack, getTopLevelPassManagerType());
+
+  if (PI && !PI->isAnalysis() && ShouldBlameAfterPass(PI)) {
+    Pass *BP = P->createBlamePass(P->getPassName());
+    BP->assignPassManager(activeStack, getTopLevelPassManagerType());
+  }
 
   if (PI && !PI->isAnalysis() && ShouldPrintAfterPass(PI)) {
     Pass *PP = P->createPrinterPass(

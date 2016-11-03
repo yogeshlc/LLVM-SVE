@@ -2298,10 +2298,9 @@ SROA::RewriteMemIntrinUserOfAlloca(MemIntrinsic *MI, Instruction *Inst,
           assert(StoreVal->getType() == ValTy && "Type mismatch!");
 
           // If the requested value was a vector constant, create it.
-          if (EltTy->isVectorTy()) {
-            unsigned NumElts = cast<VectorType>(EltTy)->getNumElements();
-            StoreVal = ConstantVector::getSplat(NumElts, StoreVal);
-          }
+          if (auto *VTy = dyn_cast<VectorType>(EltTy))
+            StoreVal =
+              ConstantVector::getSplat(VTy->getElementCount(), StoreVal);
         }
         new StoreInst(StoreVal, EltPtr, MI);
         continue;

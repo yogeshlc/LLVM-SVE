@@ -121,6 +121,45 @@ StringRef llvm::getEnumName(MVT::SimpleValueType T) {
   case MVT::v2f64:    return "MVT::v2f64";
   case MVT::v4f64:    return "MVT::v4f64";
   case MVT::v8f64:    return "MVT::v8f64";
+  case MVT::nxv2f16:  return "MVT::nxv2f16";
+  case MVT::nxv4f16:  return "MVT::nxv4f16";
+  case MVT::nxv8f16:  return "MVT::nxv8f16";
+  case MVT::nxv1f32:  return "MVT::nxv1f32";
+  case MVT::nxv2f32:  return "MVT::nxv2f32";
+  case MVT::nxv4f32:  return "MVT::nxv4f32";
+  case MVT::nxv8f32:  return "MVT::nxv8f32";
+  case MVT::nxv16f32: return "MVT::nxv16f32";
+  case MVT::nxv1f64:  return "MVT::nxv1f64";
+  case MVT::nxv2f64:  return "MVT::nxv2f64";
+  case MVT::nxv4f64:  return "MVT::nxv4f64";
+  case MVT::nxv8f64:  return "MVT::nxv8f64";
+  case MVT::nxv2i1:   return "MVT::nxv2i1";
+  case MVT::nxv4i1:   return "MVT::nxv4i1";
+  case MVT::nxv8i1:   return "MVT::nxv8i1";
+  case MVT::nxv16i1:  return "MVT::nxv16i1";
+  case MVT::nxv32i1:  return "MVT::nxv32i1";
+  case MVT::nxv1i8:   return "MVT::nxv1i8";
+  case MVT::nxv2i8:   return "MVT::nxv2i8";
+  case MVT::nxv4i8:   return "MVT::nxv4i8";
+  case MVT::nxv8i8:   return "MVT::nxv8i8";
+  case MVT::nxv16i8:  return "MVT::nxv16i8";
+  case MVT::nxv32i8:  return "MVT::nxv32i8";
+  case MVT::nxv1i16:  return "MVT::nxv1i16";
+  case MVT::nxv2i16:  return "MVT::nxv2i16";
+  case MVT::nxv4i16:  return "MVT::nxv4i16";
+  case MVT::nxv8i16:  return "MVT::nxv8i16";
+  case MVT::nxv16i16: return "MVT::nxv16i16";
+  case MVT::nxv32i16: return "MVT::nxv32i16";
+  case MVT::nxv1i32:  return "MVT::nxv1i32";
+  case MVT::nxv2i32:  return "MVT::nxv2i32";
+  case MVT::nxv4i32:  return "MVT::nxv4i32";
+  case MVT::nxv8i32:  return "MVT::nxv8i32";
+  case MVT::nxv16i32: return "MVT::nxv16i32";
+  case MVT::nxv1i64:  return "MVT::nxv1i64";
+  case MVT::nxv2i64:  return "MVT::nxv2i64";
+  case MVT::nxv4i64:  return "MVT::nxv4i64";
+  case MVT::nxv8i64:  return "MVT::nxv8i64";
+  case MVT::nxv16i64: return "MVT::nxv16i64";
   case MVT::token:    return "MVT::token";
   case MVT::Metadata: return "MVT::Metadata";
   case MVT::iPTR:     return "MVT::iPTR";
@@ -493,9 +532,38 @@ CodeGenIntrinsic::CodeGenIntrinsic(Record *R) {
         TargetPrefix + ".'!");
   }
 
-  // Parse the list of return types.
+  // Collate a list of overloaded types.
   std::vector<MVT::SimpleValueType> OverloadedVTs;
   ListInit *TypeList = R->getValueAsListInit("RetTypes");
+  for (unsigned i = 0, e = TypeList->size(); i != e; ++i) {
+    Record *TyEl = TypeList->getElementAsRecord(i);
+    assert(TyEl->isSubClassOf("LLVMType") && "Expected a type!");
+
+    if (!TyEl->isSubClassOf("LLVMMatchType")) {
+      MVT::SimpleValueType VT = getValueType(TyEl->getValueAsDef("VT"));
+      if (MVT(VT).isOverloaded()) {
+        OverloadedVTs.push_back(VT);
+        isOverloaded = true;
+      }
+    }
+  }
+
+  TypeList = R->getValueAsListInit("ParamTypes");
+  for (unsigned i = 0, e = TypeList->size(); i != e; ++i) {
+    Record *TyEl = TypeList->getElementAsRecord(i);
+    assert(TyEl->isSubClassOf("LLVMType") && "Expected a type!");
+
+    if (!TyEl->isSubClassOf("LLVMMatchType")) {
+      MVT::SimpleValueType VT = getValueType(TyEl->getValueAsDef("VT"));
+      if (MVT(VT).isOverloaded()) {
+        OverloadedVTs.push_back(VT);
+        isOverloaded = true;
+      }
+    }
+  }
+
+  // Parse the list of return types.
+  TypeList = R->getValueAsListInit("RetTypes");
   for (unsigned i = 0, e = TypeList->size(); i != e; ++i) {
     Record *TyEl = TypeList->getElementAsRecord(i);
     assert(TyEl->isSubClassOf("LLVMType") && "Expected a type!");
@@ -514,10 +582,6 @@ CodeGenIntrinsic::CodeGenIntrinsic(Record *R) {
              "Expected iAny or vAny type");
     } else {
       VT = getValueType(TyEl->getValueAsDef("VT"));
-    }
-    if (MVT(VT).isOverloaded()) {
-      OverloadedVTs.push_back(VT);
-      isOverloaded = true;
     }
 
     // Reject invalid types.
@@ -548,12 +612,8 @@ CodeGenIntrinsic::CodeGenIntrinsic(Record *R) {
                !TyEl->isSubClassOf("LLVMPointerToElt")) ||
               VT == MVT::iAny || VT == MVT::vAny) &&
              "Expected iAny or vAny type");
-    } else
+    } else {
       VT = getValueType(TyEl->getValueAsDef("VT"));
-
-    if (MVT(VT).isOverloaded()) {
-      OverloadedVTs.push_back(VT);
-      isOverloaded = true;
     }
 
     // Reject invalid types.

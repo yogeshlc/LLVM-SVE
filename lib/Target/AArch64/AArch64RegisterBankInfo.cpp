@@ -42,9 +42,12 @@ AArch64RegisterBankInfo::AArch64RegisterBankInfo(const TargetRegisterInfo &TRI)
   // The FPR register bank is fully defined by all the registers in
   // GR64all + its subclasses.
   addRegBankCoverage(AArch64::FPRRegBankID, AArch64::QQQQRegClassID, TRI);
+  addRegBankCoverage(AArch64::FPRRegBankID, AArch64::ZPR4RegClassID, TRI);
   const RegisterBank &RBFPR = getRegBank(AArch64::FPRRegBankID);
   (void)RBFPR;
   assert(RBFPR.covers(*TRI.getRegClass(AArch64::QQRegClassID)) &&
+         "Subclass not added?");
+  assert(RBFPR.covers(*TRI.getRegClass(AArch64::ZPR2ClassID)) &&
          "Subclass not added?");
   assert(RBFPR.covers(*TRI.getRegClass(AArch64::FPR64RegClassID)) &&
          "Subclass not added?");
@@ -88,6 +91,10 @@ const RegisterBank &AArch64RegisterBankInfo::getRegBankFromRegClass(
   case AArch64::QQRegClassID:
   case AArch64::QQQRegClassID:
   case AArch64::QQQQRegClassID:
+  case AArch64::ZPRRegClassID:
+  case AArch64::ZPR2RegClassID:
+  case AArch64::ZPR3RegClassID:
+  case AArch64::ZPR4RegClassID:
     return getRegBank(AArch64::FPRRegBankID);
   case AArch64::GPR32commonRegClassID:
   case AArch64::GPR32RegClassID:

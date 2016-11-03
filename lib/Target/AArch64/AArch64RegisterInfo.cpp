@@ -34,6 +34,60 @@ using namespace llvm;
 #define GET_REGINFO_TARGET_DESC
 #include "AArch64GenRegisterInfo.inc"
 
+// Returns if Function has arguments or return value of SVE type.
+//
+// Note: the SVE PCS is provisional, and should not be relied upon.
+//
+// The (proposed) SVE AAPCS states:
+//
+//    z0-z7 are used to pass SVE vector arguments to a subroutine and to
+//    return SVE vector results from a function. If a subroutine takes arguments
+//    in scalable vector or predicate registers, or if it is a function that
+//    returns results in such registers, it must ensure that the entire contents
+//    of z8-z31 are preserved across the call. In other cases it need only
+//    preserve the low 64 bits of z8-z15, as described in §5.1.2.
+//
+//    p0-p3 are used to pass scalable predicate arguments to a subroutine and to
+//    return scalable predicate results from a function. If a subroutine takes
+//    arguments in scalable vector or predicate registers, or if it is a
+//    function that returns results in these registers, it must ensure that
+//    p4-p15 are preserved across the call. In other cases it need not preserve
+//    any scalable predicate register contents.
+//
+// We can determine this by investigating the (C/C++) function and test
+// if one of the arguments (or return value) is of SVE vector
+// type given some language binding for a SVE vector type.
+//
+// Note that this is different from checking the TargetLowering of the
+// argument and testing if this is a SVE 'nxv..i..' type.
+
+bool
+isSVEFunction(const MachineFunction& MF) {
+  // Loop all arguments
+  for (const auto &arg : MF.getFunction()->args()) {
+    Type *Ty = arg.getType();
+    // If this is a struct where the first element is a scalable
+    // vec, then this is considered to be an SVE function.
+    // This currently only occurs for 'sizeless structs'
+    if (auto *STy = dyn_cast<StructType>(Ty))
+      Ty = STy->getTypeAtIndex((uint32_t)0);
+
+    // Non-vector types cannot be SVE
+    if (auto *VT = dyn_cast<VectorType>(Ty))
+      // Check if Vector is scalable (ergo, SVE)
+      if (VT->isScalable())
+        return true;
+  }
+
+  // If not yet conclusive, check return type
+  Type *Ty = MF.getFunction()->getReturnType();
+  if (auto *STy = dyn_cast<StructType>(Ty))
+    Ty = STy->getTypeAtIndex((uint32_t)0);
+
+  auto *VT = dyn_cast<VectorType>(Ty);
+  return VT && VT->isScalable();
+}
+
 AArch64RegisterInfo::AArch64RegisterInfo(const Triple &TT)
     : AArch64GenRegisterInfo(AArch64::LR), TT(TT) {}
 
@@ -46,6 +100,8 @@ AArch64RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_AArch64_NoRegs_SaveList;
   if (MF->getFunction()->getCallingConv() == CallingConv::AnyReg)
     return CSR_AArch64_AllRegs_SaveList;
+  else if (isSVEFunction(*MF))
+    return CSR_AArch64_SVE_AAPCS_SaveList;
   if (MF->getFunction()->getCallingConv() == CallingConv::CXX_FAST_TLS)
     return MF->getInfo<AArch64FunctionInfo>()->isSplitCSR() ?
            CSR_AArch64_CXX_TLS_Darwin_PE_SaveList :
@@ -80,6 +136,8 @@ AArch64RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
     return CSR_AArch64_AllRegs_RegMask;
   if (CC == CallingConv::CXX_FAST_TLS)
     return CSR_AArch64_CXX_TLS_Darwin_RegMask;
+  if (CC == CallingConv::AArch64_SVE_VectorCall)
+    return CSR_AArch64_SVE_AAPCS_RegMask;
   if (MF.getSubtarget<AArch64Subtarget>().getTargetLowering()
           ->supportSwiftError() &&
       MF.getFunction()->getAttributes().hasAttrSomewhere(Attribute::SwiftError))
@@ -214,6 +272,11 @@ AArch64RegisterInfo::getFrameRegister(const MachineFunction &MF) const {
   return TFI->hasFP(MF) ? AArch64::FP : AArch64::SP;
 }
 
+bool AArch64RegisterInfo::trackLivenessAfterRegAlloc(
+    const MachineFunction &MF) const {
+  return true;
+}
+
 bool AArch64RegisterInfo::requiresRegisterScavenging(
     const MachineFunction &MF) const {
   return true;
@@ -241,9 +304,13 @@ bool AArch64RegisterInfo::requiresFrameIndexScavenging(
 bool
 AArch64RegisterInfo::cannotEliminateFrame(const MachineFunction &MF) const {
   const MachineFrameInfo *MFI = MF.getFrameInfo();
+  const AArch64FrameLowering *TFI = static_cast<const AArch64FrameLowering *>(
+      MF.getSubtarget().getFrameLowering());
   if (MF.getTarget().Options.DisableFramePointerElim(MF) && MFI->adjustsStack())
     return true;
-  return MFI->hasVarSizedObjects() || MFI->isFrameAddressTaken();
+  return MFI->hasVarSizedObjects() ||
+         MFI->isFrameAddressTaken() ||
+         TFI->hasVarSizedRegions(MF);
 }
 
 /// needsFrameBaseReg - Returns true if the instruction's frame index
@@ -371,6 +438,7 @@ void AArch64RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   const AArch64InstrInfo *TII =
       MF.getSubtarget<AArch64Subtarget>().getInstrInfo();
   const AArch64FrameLowering *TFI = getFrameLowering(MF);
+  const MachineFrameInfo *MFI = MF.getFrameInfo();
 
   int FrameIndex = MI.getOperand(FIOperandNum).getIndex();
   unsigned FrameReg;
@@ -389,18 +457,67 @@ void AArch64RegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
 
   // Modify MI as necessary to handle as much of 'Offset' as possible
   Offset = TFI->resolveFrameIndexReference(MF, FrameIndex, FrameReg);
-  if (rewriteAArch64FrameIndex(MI, FIOperandNum, FrameReg, Offset, TII))
+
+  // Fixed size arguments in combination with SVE Region and SP addressing.
+  bool IsTempFrameReg = false;
+  if (TFI->hasVarSizedRegions(MF) && MFI->isFixedObjectIndex(FrameIndex)) {
+    // Fixed arguments are accessed at offset 'Offset' from SP, assuming no
+    // SVE. We only need to add SVE stack region size to it.
+    const SmallVectorImpl<StackRegion *> &StackRegions =
+      MF.getFrameInfo()->getStackRegions();
+    uint64_t RegionsSize =
+      StackRegions[0]->getRegionSize() + StackRegions[1]->getRegionSize();
+    if (FrameReg == AArch64::FP && RegionsSize > 0)
+      Offset -= 16;
+    FrameReg =
+        SVEVecStackRegion::adjustRegBySVE(MF, MBB, II, MI.getDebugLoc(),
+                                          FrameReg, RegionsSize, true);
+
+    IsTempFrameReg = true;
+  } else if (MF.getFrameInfo()->getObjectRegion(FrameIndex)) {
+    if (FrameReg == AArch64::SP && MFI->getStackSize() > 0) {
+      // SVE registers are accessed from
+      //    SP + (non-SVE region) + vector offset
+      FrameReg = MF.getRegInfo().createVirtualRegister(&AArch64::GPR64RegClass);
+      emitFrameOffset(MBB, II, MI.getDebugLoc(), FrameReg, AArch64::SP,
+                      MFI->getStackSize(), TII);
+      IsTempFrameReg = true;
+    }
+    // EXTRASTACKREGION: For now, we've commented this out since
+    // AArch64FrameLowering::layoutStackRegions was changed to allocate extra
+    // space to avoid emitting an add instruction for every SVE frame pointer
+    // based spill or fill. Eventually we'll want to avoid throwing away
+    // so much stack space, but at that point we will also want to try to
+    // reduce the number of adds emitted.
+
+    //else if (FrameReg == AArch64::FP) {
+      // Jump over 16 byte frame-record (FP+LR)
+      //
+      //      FrameReg = MF.getRegInfo().createVirtualRegister(&AArch64::GPR64RegClass);
+      //      emitFrameOffset(MBB, II, MI.getDebugLoc(), FrameReg, AArch64::FP, 16, TII);
+      //      IsTempFrameReg = true;
+    //}
+  }
+
+  if (rewriteAArch64FrameIndex(MI, FIOperandNum, FrameReg, Offset, TII, IsTempFrameReg))
     return;
 
   assert((!RS || !RS->isScavengingFrameIndex(FrameIndex)) &&
          "Emergency spill slot is out of reach");
 
-  // If we get here, the immediate doesn't fit into the instruction.  We folded
-  // as much as possible above.  Handle the rest, providing a register that is
-  // SP+LargeImm.
-  unsigned ScratchReg =
+  // Reuse the existing scratch register if possible
+  unsigned ScratchReg = IsTempFrameReg ? FrameReg :
       MF.getRegInfo().createVirtualRegister(&AArch64::GPR64RegClass);
-  emitFrameOffset(MBB, II, MI.getDebugLoc(), ScratchReg, FrameReg, Offset, TII);
+
+  if (MF.getFrameInfo()->getObjectRegion(FrameIndex)) {
+    SVEVecStackRegion::adjustRegBySVE(MF, MBB, II, MI.getDebugLoc(), FrameReg,
+                                      std::abs(Offset), Offset >= 0, ScratchReg);
+  } else {
+    // If we get here, the immediate doesn't fit into the instruction.  We folded
+    // as much as possible above.  Handle the rest, providing a register that is
+    // SP+LargeImm.
+    emitFrameOffset(MBB, II, MI.getDebugLoc(), ScratchReg, FrameReg, Offset, TII);
+  }
   MI.getOperand(FIOperandNum).ChangeToRegister(ScratchReg, false, false, true);
 }
 
@@ -431,6 +548,7 @@ unsigned AArch64RegisterInfo::getRegPressureLimit(const TargetRegisterClass *RC,
   case AArch64::FPR32RegClassID:
   case AArch64::FPR64RegClassID:
   case AArch64::FPR128RegClassID:
+  case AArch64::ZPRRegClassID:
     return 32;
 
   case AArch64::DDRegClassID:
@@ -439,6 +557,9 @@ unsigned AArch64RegisterInfo::getRegPressureLimit(const TargetRegisterClass *RC,
   case AArch64::QQRegClassID:
   case AArch64::QQQRegClassID:
   case AArch64::QQQQRegClassID:
+  case AArch64::ZPR2RegClassID:
+  case AArch64::ZPR3RegClassID:
+  case AArch64::ZPR4RegClassID:
     return 32;
 
   case AArch64::FPR128_loRegClassID:

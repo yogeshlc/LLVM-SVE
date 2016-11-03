@@ -1,7 +1,7 @@
 ; RUN: opt -strip-dead-debug-info -verify %s -S | FileCheck %s
 
 ; CHECK: ModuleID = '{{.*}}'
-; CHECK-NOT: bar
+; CHECK-NOT: bar_
 ; CHECK-NOT: abcd
 
 @xyz = global i32 2
@@ -33,7 +33,7 @@ attributes #2 = { nounwind readonly ssp }
 !0 = distinct !DICompileUnit(language: DW_LANG_C89, producer: "4.2.1 (Based on Apple Inc. build 5658) (LLVM build)", isOptimized: true, emissionKind: FullDebug, file: !1, enums: !{}, retainedTypes: !{}, globals: !24)
 !1 = !DIFile(filename: "g.c", directory: "/tmp/")
 !2 = !{null}
-!3 = distinct !DISubprogram(name: "bar", line: 5, isLocal: true, isDefinition: true, virtualIndex: 6, isOptimized: true, unit: !0, file: !1, scope: null, type: !4)
+!3 = distinct !DISubprogram(name: "bar_", line: 5, isLocal: true, isDefinition: true, virtualIndex: 6, isOptimized: true, unit: !0, file: !1, scope: null, type: !4)
 !4 = !DISubroutineType(types: !2)
 !5 = !DIFile(filename: "g.c", directory: "/tmp/")
 !6 = distinct !DISubprogram(name: "fn", linkageName: "fn", line: 6, isLocal: false, isDefinition: true, virtualIndex: 6, isOptimized: true, unit: !0, file: !1, scope: null, type: !7)

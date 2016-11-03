@@ -314,7 +314,7 @@ static Value *simplifyX86immShift(const IntrinsicInst &II,
 
   // Get a constant vector of the same type as the first operand.
   auto ShiftAmt = ConstantInt::get(SVT, Count.zextOrTrunc(BitWidth));
-  auto ShiftVec = Builder.CreateVectorSplat(VWidth, ShiftAmt);
+  auto ShiftVec = Builder.CreateVectorSplat({VWidth, false}, ShiftAmt);
 
   if (ShiftLeft)
     return Builder.CreateShl(Vec, ShiftVec);

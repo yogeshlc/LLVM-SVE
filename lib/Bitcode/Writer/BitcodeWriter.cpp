@@ -891,6 +891,7 @@ void ModuleBitcodeWriter::writeTypeTable() {
       VectorType *VT = cast<VectorType>(T);
       // VECTOR [numelts, eltty]
       Code = bitc::TYPE_CODE_VECTOR;
+      TypeVals.push_back(VT->isScalable());
       TypeVals.push_back(VT->getNumElements());
       TypeVals.push_back(VE.getTypeID(VT->getElementType()));
       break;
@@ -2166,6 +2167,17 @@ void ModuleBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
         Record.push_back(VE.getValueID(C->getOperand(1)));
         Record.push_back(VE.getValueID(C->getOperand(2)));
         break;
+      case Instruction::SeriesVector:
+        Code = bitc::CST_CODE_CE_SERIESVEC;
+        Record.push_back(VE.getTypeID(C->getOperand(0)->getType()));
+        Record.push_back(VE.getValueID(C->getOperand(0)));
+        Record.push_back(VE.getValueID(C->getOperand(1)));
+        break;
+      case Instruction::ElementCount:
+        Code = bitc::CST_CODE_CE_ELTCOUNT;
+        Record.push_back(VE.getTypeID(C->getOperand(0)->getType()));
+        Record.push_back(VE.getValueID(C->getOperand(0)));
+        break;
       case Instruction::ICmp:
       case Instruction::FCmp:
         Code = bitc::CST_CODE_CE_CMP;
@@ -2336,6 +2348,27 @@ void ModuleBitcodeWriter::writeInstruction(const Instruction &I,
     pushValueAndType(I.getOperand(0), InstID, Vals);
     pushValue(I.getOperand(1), InstID, Vals);
     pushValue(I.getOperand(2), InstID, Vals);
+    break;
+  case Instruction::SeriesVector:
+    Code = bitc::FUNC_CODE_INST_SERIESVEC;
+    Vals.push_back(VE.getTypeID(I.getType()));
+    pushValueAndType(I.getOperand(0), InstID, Vals);
+    pushValue(I.getOperand(1), InstID, Vals);
+    break;
+  case Instruction::ElementCount:
+    Code = bitc::FUNC_CODE_INST_ELTCOUNT;
+    Vals.push_back(VE.getTypeID(I.getType()));
+    pushValueAndType(I.getOperand(0), InstID, Vals);
+  break;
+  case Instruction::Test:
+    Code = bitc::FUNC_CODE_INST_TEST;
+    Vals.push_back(cast<TestInst>(I).getPredicate());
+    pushValueAndType(I.getOperand(0), InstID, Vals);
+    break;
+  case Instruction::PropFF:
+    Code = bitc::FUNC_CODE_INST_PROPFF;
+    pushValueAndType(I.getOperand(0), InstID, Vals);
+    pushValue(I.getOperand(1), InstID, Vals);
     break;
   case Instruction::ICmp:
   case Instruction::FCmp: {

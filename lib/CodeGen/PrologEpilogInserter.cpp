@@ -197,6 +197,9 @@ bool PEI::runOnMachineFunction(MachineFunction &Fn) {
   // Calculate actual frame offsets for all abstract stack objects...
   calculateFrameObjectOffsets(Fn);
 
+  // Let the target define its own way to handle StackRegions
+  TFI->layoutStackRegions(Fn);
+
   // Add prolog and epilog code to the function.  This function is required
   // to align the stack frame as necessary for any stack variables or
   // called functions.  Because of this, calculateCalleeSavedRegisters()
@@ -357,6 +360,13 @@ static void assignCalleeSavedSpillSlots(MachineFunction &F,
       unsigned Reg = CS.getReg();
       const TargetRegisterClass *RC = RegInfo->getMinimalPhysRegClass(Reg);
 
+      // [SVE] We are only allocating the normal stack region for now,
+      // so ignore all CSRs that are not saved to the default stack.
+      // Note that the set of CalleeSaved Registers stays the same,
+      // as it is used in later stages.
+      if (MFI->getStackRegionToHandleCSR(Reg) != nullptr)
+        continue;
+
       int FrameIdx;
       if (RegInfo->hasReservedSpillSlot(F, Reg, FrameIdx)) {
         CS.setFrameIdx(FrameIdx);
@@ -479,6 +489,11 @@ static void insertCSRSpillsAndRestores(MachineFunction &Fn,
     I = SaveBlock->begin();
     if (!TFI->spillCalleeSavedRegisters(*SaveBlock, I, CSI, TRI)) {
       for (unsigned i = 0, e = CSI.size(); i != e; ++i) {
+
+        // [SVE] Only handle CSR spill for default stack region
+        if (MFI->getStackRegionToHandleCSR(CSI[i].getReg()) != nullptr)
+          continue;
+
         // Insert the spill to the stack frame.
         unsigned Reg = CSI[i].getReg();
         const TargetRegisterClass *RC = TRI->getMinimalPhysRegClass(Reg);
@@ -510,6 +525,11 @@ static void insertCSRSpillsAndRestores(MachineFunction &Fn,
     if (!TFI->restoreCalleeSavedRegisters(*MBB, I, CSI, TRI)) {
       for (unsigned i = 0, e = CSI.size(); i != e; ++i) {
         unsigned Reg = CSI[i].getReg();
+
+        // [SVE] Only handle CSR spill for default stack region
+        if (MFI->getStackRegionToHandleCSR(Reg) != nullptr)
+          continue;
+
         const TargetRegisterClass *RC = TRI->getMinimalPhysRegClass(Reg);
         TII.loadRegFromStackSlot(*MBB, I, Reg, CSI[i].getFrameIdx(), RC, TRI);
         assert(I != MBB->begin() &&
@@ -743,6 +763,9 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &Fn) {
   // First assign frame offsets to stack objects that are used to spill
   // callee saved registers.
   if (StackGrowsDown) {
+    // [SVE][Note] (Min|Max)CSFrameIndex are object-references (by index) to
+    // consecutive non-SVE saves, so we don't have to add any code here to
+    // guard for SVE-saves.
     for (unsigned i = MinCSFrameIndex; i <= MaxCSFrameIndex; ++i) {
       // If the stack grows down, we need to add the size to find the lowest
       // address of the object.
@@ -839,6 +862,8 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &Fn) {
         continue;
       if (MFI->getStackProtectorIndex() == (int)i)
         continue;
+      if (MFI->getObjectRegion(i) != nullptr)
+        continue;
 
       switch (SP->getSSPLayout(MFI->getObjectAllocation(i))) {
       case StackProtector::SSPLK_None:
@@ -887,6 +912,8 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &Fn) {
     if (EHRegNodeFrameIndex == (int)i)
       continue;
     if (ProtectedObjs.count(i))
+      continue;
+    if (MFI->getObjectRegion(i) != nullptr)
       continue;
 
     // Add the objects that we need to allocate to our working set.
@@ -1132,7 +1159,7 @@ void PEI::replaceFrameIndices(MachineBasicBlock *BB, MachineFunction &Fn,
     // the SP adjustment made by each instruction in the sequence.
     // This includes both the frame setup/destroy pseudos (handled above),
     // as well as other instructions that have side effects w.r.t the SP.
-    // Note that this must come after eliminateFrameIndex, because 
+    // Note that this must come after eliminateFrameIndex, because
     // if I itself referred to a frame index, we shouldn't count its own
     // adjustment.
     if (MI && InsideCallSequence)
@@ -1205,7 +1232,7 @@ doScavengeFrameVirtualRegs(MachineFunction &Fn, RegScavenger *RS) {
           // scratch register.
           assert (ScratchReg && "Missing scratch register!");
           Fn.getRegInfo().replaceRegWith(Reg, ScratchReg);
-          
+
           // Because this instruction was processed by the RS before this
           // register was allocated, make sure that the RS now records the
           // register as being used.

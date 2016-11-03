@@ -209,6 +209,8 @@ public:
   getSerializableBitmaskMachineOperandTargetFlags() const override;
 
 private:
+  unsigned getInstBundleLength(const MachineInstr *MI) const;
+
   void instantiateCondBranch(MachineBasicBlock &MBB, DebugLoc DL,
                              MachineBasicBlock *TBB,
                              ArrayRef<MachineOperand> Cond) const;
@@ -231,7 +233,8 @@ void emitFrameOffset(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
 /// return the left-over portion by reference.
 bool rewriteAArch64FrameIndex(MachineInstr &MI, unsigned FrameRegIdx,
                             unsigned FrameReg, int &Offset,
-                            const AArch64InstrInfo *TII);
+                            const AArch64InstrInfo *TII,
+                            bool IsTemporaryFrameReg = false);
 
 /// \brief Use to report the frame offset status in isAArch64FrameOffsetLegal.
 enum AArch64FrameOffsetStatus {

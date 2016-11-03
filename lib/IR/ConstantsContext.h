@@ -143,12 +143,54 @@ public:
   ShuffleVectorConstantExpr(Constant *C1, Constant *C2, Constant *C3)
   : ConstantExpr(VectorType::get(
                    cast<VectorType>(C1->getType())->getElementType(),
-                   cast<VectorType>(C3->getType())->getNumElements()),
+                   cast<VectorType>(C3->getType())->getElementCount()),
                  Instruction::ShuffleVector,
                  &Op<0>(), 3) {
     Op<0>() = C1;
     Op<1>() = C2;
     Op<2>() = C3;
+  }
+  /// Transparently provide more efficient getOperand methods.
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+};
+
+/// ElementCountConstantExpr - This class is private to
+/// Constants.cpp, and is used behind the scenes to implement
+/// elementcount constant exprs.
+class ElementCountConstantExpr : public ConstantExpr {
+  void anchor() override;
+  void *operator new(size_t, unsigned) = delete;
+public:
+  // allocate space for exactly two operands
+  void *operator new(size_t s) {
+    return User::operator new(s, 1);
+  }
+  ElementCountConstantExpr(Type* Ty, Constant *C)
+  : ConstantExpr(Ty, Instruction::ElementCount, &Op<0>(), 1) {
+    Op<0>() = C;
+  }
+  /// Transparently provide more efficient getOperand methods.
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+};
+
+/// SeriesVectorConstantExpr - This class is private to
+/// Constants.cpp, and is used behind the scenes to implement
+/// seriesvector constant exprs.
+class SeriesVectorConstantExpr : public ConstantExpr {
+  void anchor() override;
+  void *operator new(size_t, unsigned) = delete;
+public:
+  // allocate space for exactly two operands
+  void *operator new(size_t s) {
+    return User::operator new(s, 2);
+  }
+  SeriesVectorConstantExpr(Constant *C1, Constant *C2,
+                           VectorType::ElementCount EC, unsigned Flags)
+  : ConstantExpr(VectorType::get(C1->getType(), EC),
+                 Instruction::SeriesVector,
+                 &Op<0>(), 2) {
+    Op<0>() = C1;
+    Op<1>() = C2;
   }
   /// Transparently provide more efficient getOperand methods.
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
@@ -309,6 +351,18 @@ template <>
 struct OperandTraits<ShuffleVectorConstantExpr>
     : public FixedNumOperandTraits<ShuffleVectorConstantExpr, 3> {};
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ShuffleVectorConstantExpr, Value)
+
+template <>
+struct OperandTraits<ElementCountConstantExpr> :
+    public FixedNumOperandTraits<ElementCountConstantExpr, 1> {
+};
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ElementCountConstantExpr, Value)
+
+template <>
+struct OperandTraits<SeriesVectorConstantExpr> :
+    public FixedNumOperandTraits<SeriesVectorConstantExpr, 2> {
+};
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SeriesVectorConstantExpr, Value)
 
 template <>
 struct OperandTraits<ExtractValueConstantExpr>
@@ -518,6 +572,12 @@ struct ConstantExprKeyType {
       return new InsertElementConstantExpr(Ops[0], Ops[1], Ops[2]);
     case Instruction::ShuffleVector:
       return new ShuffleVectorConstantExpr(Ops[0], Ops[1], Ops[2]);
+    case Instruction::ElementCount:
+      return new ElementCountConstantExpr(Ty, Ops[0]);
+    case Instruction::SeriesVector:
+      return new SeriesVectorConstantExpr(Ops[0], Ops[1],
+                                        cast<VectorType>(Ty)->getElementCount(),
+                                        SubclassOptionalData);
     case Instruction::InsertValue:
       return new InsertValueConstantExpr(Ops[0], Ops[1], Indexes, Ty);
     case Instruction::ExtractValue:

@@ -37,10 +37,18 @@ ModulePass *createPrintModulePass(raw_ostream &OS,
                                   const std::string &Banner = "",
                                   bool ShouldPreserveUseListOrder = false);
 
+/// createBlameModulePass - Get a pass that tags all untagged instructions
+/// with the name of the pass that created them.
+ModulePass *createBlameModulePass(const std::string &PassName = "");
+
 /// \brief Create and return a pass that prints functions to the specified
 /// \c raw_ostream as they are processed.
 FunctionPass *createPrintFunctionPass(raw_ostream &OS,
                                       const std::string &Banner = "");
+
+/// createBlameFunctionPass - Get a pass that tags all untagged instructions
+/// with the name of the pass that created them.
+FunctionPass *createBlameFunctionPass(const std::string &PassName);
 
 /// \brief Create and return a pass that writes the BB to the specified
 /// \c raw_ostream.
@@ -72,6 +80,18 @@ public:
   static StringRef name() { return "PrintModulePass"; }
 };
 
+class BlameModulePass {
+  std::string PassName;
+
+public:
+  BlameModulePass();
+  BlameModulePass(const std::string &PassName = "");
+
+  PreservedAnalyses run(Module &M);
+
+  static StringRef name() { return "BlameModulePass"; }
+};
+
 /// \brief Pass for printing a Function as LLVM's text IR assembly.
 ///
 /// Note: This pass is for use with the new pass manager. Use the create...Pass
@@ -87,6 +107,18 @@ public:
   PreservedAnalyses run(Function &F);
 
   static StringRef name() { return "PrintFunctionPass"; }
+};
+
+class BlameFunctionPass {
+  std::string PassName;
+
+public:
+  BlameFunctionPass();
+  BlameFunctionPass(const std::string &PassName = "");
+
+  PreservedAnalyses run(Function &F);
+
+  static StringRef name() { return "BlameFunctionPass"; }
 };
 
 } // End llvm namespace

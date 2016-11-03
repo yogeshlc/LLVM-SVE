@@ -612,6 +612,7 @@ public:
   }
 
   SDValue getCondCode(ISD::CondCode Cond);
+  SDValue getTestCode(ISD::TestCode Cond);
 
   /// Returns the ConvertRndSat Note: Avoid using this node because it may
   /// disappear in the future and most targets don't support it.
@@ -811,8 +812,13 @@ public:
       "Cannot compare scalars to vectors");
     assert(LHS.getValueType().isVector() == VT.isVector() &&
       "Cannot compare scalars to vectors");
+    assert(LHS.getValueType() == RHS.getValueType() &&
+      "Cannot compare different types");
+    assert(LHS.getValueType().isScalableVector() ==
+           VT.isScalableVector() &&
+      "Cannot compare different types");
     assert(Cond != ISD::SETCC_INVALID &&
-        "Cannot create a setCC of an invalid node.");
+      "Cannot create a setCC of an invalid node.");
     return getNode(ISD::SETCC, DL, VT, LHS, RHS, getCondCode(Cond));
   }
 
@@ -965,9 +971,11 @@ public:
                          SDValue Ptr, SDValue Mask, EVT MemVT,
                          MachineMemOperand *MMO, bool IsTrunc);
   SDValue getMaskedGather(SDVTList VTs, EVT VT, SDLoc dl,
-                          ArrayRef<SDValue> Ops, MachineMemOperand *MMO);
+                          ArrayRef<SDValue> Ops, MachineMemOperand *MMO,
+                          ISD::LoadExtType ExtTy);
   SDValue getMaskedScatter(SDVTList VTs, EVT VT, SDLoc dl,
-                           ArrayRef<SDValue> Ops, MachineMemOperand *MMO);
+                           ArrayRef<SDValue> Ops, MachineMemOperand *MMO,
+                           bool IsTrunc);
   /// Construct a node to track a Value* through the backend.
   SDValue getSrcValue(const Value *v);
 
@@ -1255,6 +1263,12 @@ public:
                                        EVT VT, ArrayRef<SDValue> Ops,
                                        const SDNodeFlags *Flags = nullptr);
 
+  SDValue FoldSeriesVectorBinOp(unsigned Opcode, SDLoc DL, EVT VT, SDValue N1,
+                                SDValue N2, const SDNodeFlags *Flags);
+
+  SDValue FoldSplatVectorBinOp(unsigned Opcode, SDLoc DL, EVT VT, SDValue N1,
+                               SDValue N2, const SDNodeFlags *Flags);
+
   /// Constant fold a setcc to true or false.
   SDValue FoldSetCC(EVT VT, SDValue N1,
                     SDValue N2, ISD::CondCode Cond, SDLoc dl);
@@ -1327,6 +1341,10 @@ public:
   /// location that the 'Base' load is loading from.
   bool areNonVolatileConsecutiveLoads(LoadSDNode *LD, LoadSDNode *Base,
                                       unsigned Bytes, int Dist) const;
+
+  /// Returns true if Op is a splat of an integer constant. The splatted value
+  /// is returned via SplatValue when not null.
+  bool isConstantIntSplat(SDValue Op, APInt* SplatValue);
 
   /// Infer alignment of a load / store address. Return 0 if
   /// it cannot be inferred.
@@ -1401,6 +1419,7 @@ private:
 
   /// Maps to auto-CSE operations.
   std::vector<CondCodeSDNode*> CondCodeNodes;
+  std::vector<TestCodeSDNode*> TestCodeNodes;
 
   std::vector<SDNode*> ValueTypeNodes;
   std::map<EVT, SDNode*, EVT::compareRawBits> ExtendedValueTypeNodes;

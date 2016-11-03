@@ -226,6 +226,10 @@ void InsertElementConstantExpr::anchor() { }
 
 void ShuffleVectorConstantExpr::anchor() { }
 
+void ElementCountConstantExpr::anchor() { }
+
+void SeriesVectorConstantExpr::anchor() { }
+
 void ExtractValueConstantExpr::anchor() { }
 
 void InsertValueConstantExpr::anchor() { }

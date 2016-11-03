@@ -345,6 +345,7 @@ public:
   Type *getArrayElementType() const { return getSequentialElementType(); }
 
   inline unsigned getVectorNumElements() const;
+  inline unsigned getVectorIsScalable() const;
   Type *getVectorElementType() const { return getSequentialElementType(); }
 
   Type *getPointerElementType() const { return getSequentialElementType(); }

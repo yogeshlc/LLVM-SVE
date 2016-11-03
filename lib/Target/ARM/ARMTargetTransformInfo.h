@@ -96,6 +96,10 @@ public:
     return 32;
   }
 
+  unsigned getRegisterBitWidthUpperBound(bool Vector) {
+    return getRegisterBitWidth(Vector);
+  }
+
   unsigned getMaxInterleaveFactor(unsigned VF) {
     // These are out of order CPUs:
     if (ST->isCortexA15() || ST->isSwift())

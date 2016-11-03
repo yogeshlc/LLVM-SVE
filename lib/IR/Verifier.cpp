@@ -454,8 +454,12 @@ private:
   void verifyMustTailCall(CallInst &CI);
   bool performTypeCheck(Intrinsic::ID ID, Function *F, Type *Ty, int VT,
                         unsigned ArgNo, std::string &Suffix);
+  void addOverloadedArgTypes(Type *Ty,
+                             ArrayRef<Intrinsic::IITDescriptor> &Infos,
+                             SmallVectorImpl<Type *> &ArgTys);
   bool verifyIntrinsicType(Type *Ty, ArrayRef<Intrinsic::IITDescriptor> &Infos,
-                           SmallVectorImpl<Type *> &ArgTys);
+                           const SmallVectorImpl<Type *> &ArgTys,
+                           unsigned &ArgCount);
   bool verifyIntrinsicIsVarArg(bool isVarArg,
                                ArrayRef<Intrinsic::IITDescriptor> &Infos);
   bool verifyAttributeCount(AttributeSet Attrs, unsigned Params);
@@ -3730,6 +3734,79 @@ void Verifier::visitInstruction(Instruction &I) {
   InstsInThisBlock.insert(&I);
 }
 
+/// Walk the descriptors much like verifyIntrinsicType but rather than verify
+/// all the types, just populate ArgTys with Ty when it's positioned where an
+/// overloaded type is expected.
+void Verifier::addOverloadedArgTypes(Type *Ty,
+                                     ArrayRef<Intrinsic::IITDescriptor> &Infos,
+                                     SmallVectorImpl<Type*> &ArgTys) {
+  using namespace Intrinsic;
+
+  // If we ran out of descriptors, there are too many arguments.
+  if (Infos.empty()) return;
+  IITDescriptor D = Infos.front();
+  Infos = Infos.slice(1);
+
+  switch (D.Kind) {
+  // Stop when a leaf descriptor is reached.
+  case IITDescriptor::Void:
+  case IITDescriptor::VarArg:
+  case IITDescriptor::MMX:
+  case IITDescriptor::Token:
+  case IITDescriptor::Metadata:
+  case IITDescriptor::Half:
+  case IITDescriptor::Float:
+  case IITDescriptor::Double:
+  case IITDescriptor::Integer:
+  case IITDescriptor::ExtendArgument:
+  case IITDescriptor::TruncArgument:
+  case IITDescriptor::UnpackArgument:
+  case IITDescriptor::HalfVecArgument:
+  case IITDescriptor::DoubleVecArgument:
+  case IITDescriptor::PtrToArgument:
+  case IITDescriptor::VecOfBitcastsToInt:
+  case IITDescriptor::VecOfPtrsToElt:
+  case IITDescriptor::VecElementArgument:
+    return;
+
+  // We must continue descending for these descriptors.
+  case IITDescriptor::Vector:
+  case IITDescriptor::SameVecWidthArgument: {
+    if (auto *VT = dyn_cast<VectorType>(Ty))
+      addOverloadedArgTypes(VT->getElementType(), Infos, ArgTys);
+    return;
+  }
+  case IITDescriptor::Pointer: {
+    if (auto *PT = dyn_cast<PointerType>(Ty))
+      addOverloadedArgTypes(PT->getElementType(), Infos, ArgTys);
+    return;
+  }
+  case IITDescriptor::Struct: {
+    if (auto *ST = dyn_cast<StructType>(Ty))
+      for (unsigned i = 0, e = D.Struct_NumElements; i != e; ++i)
+        addOverloadedArgTypes(ST->getElementType(i), Infos, ArgTys);
+    return;
+  }
+  case IITDescriptor::ScalableVecArgument: {
+    addOverloadedArgTypes(Ty, Infos, ArgTys);
+    return;
+  }
+
+  // This descriptor marks a potential overloaded type to recorded.
+  case IITDescriptor::Argument: {
+    // Ignore subsequent occurrences of an argument.
+    if (D.getArgumentNumber() < ArgTys.size())
+      return;
+
+    // Record the first instance of an argument.
+    assert(D.getArgumentNumber() == ArgTys.size() && "Table consistency error");
+    ArgTys.push_back(Ty);
+    return;
+  }
+  }
+  llvm_unreachable("unhandled");
+}
+
 /// Verify that the specified type (which comes from an intrinsic argument or
 /// return value) matches the type constraints specified by the .td file (e.g.
 /// an "any integer" argument really is an integer).
@@ -3737,7 +3814,8 @@ void Verifier::visitInstruction(Instruction &I) {
 /// This returns true on error but does not print a message.
 bool Verifier::verifyIntrinsicType(Type *Ty,
                                    ArrayRef<Intrinsic::IITDescriptor> &Infos,
-                                   SmallVectorImpl<Type*> &ArgTys) {
+                                   const SmallVectorImpl<Type*> &ArgTys,
+                                   unsigned &ArgCount) {
   using namespace Intrinsic;
 
   // If we ran out of descriptors, there are too many arguments.
@@ -3758,12 +3836,12 @@ bool Verifier::verifyIntrinsicType(Type *Ty,
   case IITDescriptor::Vector: {
     VectorType *VT = dyn_cast<VectorType>(Ty);
     return !VT || VT->getNumElements() != D.Vector_Width ||
-           verifyIntrinsicType(VT->getElementType(), Infos, ArgTys);
+           verifyIntrinsicType(VT->getElementType(), Infos, ArgTys, ArgCount);
   }
   case IITDescriptor::Pointer: {
     PointerType *PT = dyn_cast<PointerType>(Ty);
     return !PT || PT->getAddressSpace() != D.Pointer_AddressSpace ||
-           verifyIntrinsicType(PT->getElementType(), Infos, ArgTys);
+           verifyIntrinsicType(PT->getElementType(), Infos, ArgTys, ArgCount);
   }
 
   case IITDescriptor::Struct: {
@@ -3772,7 +3850,7 @@ bool Verifier::verifyIntrinsicType(Type *Ty,
       return true;
 
     for (unsigned i = 0, e = D.Struct_NumElements; i != e; ++i)
-      if (verifyIntrinsicType(ST->getElementType(i), Infos, ArgTys))
+      if (verifyIntrinsicType(ST->getElementType(i), Infos, ArgTys, ArgCount))
         return true;
     return false;
   }
@@ -3780,13 +3858,13 @@ bool Verifier::verifyIntrinsicType(Type *Ty,
   case IITDescriptor::Argument:
     // Two cases here - If this is the second occurrence of an argument, verify
     // that the later instance matches the previous instance.
-    if (D.getArgumentNumber() < ArgTys.size())
+    if (D.getArgumentNumber() < ArgCount)
       return Ty != ArgTys[D.getArgumentNumber()];
 
     // Otherwise, if this is the first instance of an argument, record it and
     // verify the "Any" kind.
-    assert(D.getArgumentNumber() == ArgTys.size() && "Table consistency error");
-    ArgTys.push_back(Ty);
+    assert(D.getArgumentNumber() == ArgCount && "Table consistency error");
+    ++ArgCount;
 
     switch (D.getArgumentKind()) {
     case IITDescriptor::AK_Any:        return false; // Success
@@ -3827,16 +3905,36 @@ bool Verifier::verifyIntrinsicType(Type *Ty,
 
     return Ty != NewTy;
   }
+  case IITDescriptor::UnpackArgument: {
+    // This may only be used when referring to a previous vector argument.
+    if (D.getArgumentNumber() >= ArgTys.size())
+      return true;
+
+    Type *NewTy = ArgTys[D.getArgumentNumber()];
+    if (VectorType *VTy = dyn_cast<VectorType>(NewTy))
+      NewTy = VectorType::getDoubleElementsVectorType(
+                VectorType::getTruncatedElementVectorType(VTy));
+    else
+      return true;
+
+    return Ty != NewTy;
+  }
   case IITDescriptor::HalfVecArgument:
     // This may only be used when referring to a previous vector argument.
     return D.getArgumentNumber() >= ArgTys.size() ||
            !isa<VectorType>(ArgTys[D.getArgumentNumber()]) ||
            VectorType::getHalfElementsVectorType(
                          cast<VectorType>(ArgTys[D.getArgumentNumber()])) != Ty;
+  case IITDescriptor::DoubleVecArgument:
+    // This may only be used when referring to a previous vector argument.
+    return D.getArgumentNumber() >= ArgTys.size() ||
+           !isa<VectorType>(ArgTys[D.getArgumentNumber()]) ||
+           VectorType::getDoubleElementsVectorType(
+                         cast<VectorType>(ArgTys[D.getArgumentNumber()])) != Ty;
   case IITDescriptor::SameVecWidthArgument: {
     if (D.getArgumentNumber() >= ArgTys.size())
       return true;
-    VectorType * ReferenceType =
+    VectorType *ReferenceType =
       dyn_cast<VectorType>(ArgTys[D.getArgumentNumber()]);
     VectorType *ThisArgType = dyn_cast<VectorType>(Ty);
     if (!ThisArgType || !ReferenceType || 
@@ -3844,7 +3942,7 @@ bool Verifier::verifyIntrinsicType(Type *Ty,
          ThisArgType->getVectorNumElements()))
       return true;
     return verifyIntrinsicType(ThisArgType->getVectorElementType(),
-                               Infos, ArgTys);
+                               Infos, ArgTys, ArgCount);
   }
   case IITDescriptor::PtrToArgument: {
     if (D.getArgumentNumber() >= ArgTys.size())
@@ -3853,11 +3951,20 @@ bool Verifier::verifyIntrinsicType(Type *Ty,
     PointerType *ThisArgType = dyn_cast<PointerType>(Ty);
     return (!ThisArgType || ThisArgType->getElementType() != ReferenceType);
   }
+  case IITDescriptor::VecOfBitcastsToInt: {
+    if (D.getArgumentNumber() >= ArgTys.size())
+      return true;
+    auto *ReferenceType = dyn_cast<VectorType>(ArgTys[D.getArgumentNumber()]);
+    auto *ThisArgVecTy = dyn_cast<VectorType>(Ty);
+    if (!ThisArgVecTy || !ReferenceType)
+      return true;
+    return ThisArgVecTy != VectorType::getInteger(ReferenceType);
+  }
   case IITDescriptor::VecOfPtrsToElt: {
     if (D.getArgumentNumber() >= ArgTys.size())
       return true;
-    VectorType * ReferenceType =
-      dyn_cast<VectorType> (ArgTys[D.getArgumentNumber()]);
+    VectorType *ReferenceType =
+      dyn_cast<VectorType>(ArgTys[D.getArgumentNumber()]);
     VectorType *ThisArgVecTy = dyn_cast<VectorType>(Ty);
     if (!ThisArgVecTy || !ReferenceType || 
         (ReferenceType->getVectorNumElements() !=
@@ -3869,6 +3976,18 @@ bool Verifier::verifyIntrinsicType(Type *Ty,
       return true;
     return ThisArgEltTy->getElementType() !=
            ReferenceType->getVectorElementType();
+  }
+  case IITDescriptor::ScalableVecArgument: {
+    VectorType *VTy = dyn_cast<VectorType>(Ty);
+    if (!VTy || !VTy->isScalable())
+      return true;
+    return verifyIntrinsicType(VTy, Infos, ArgTys, ArgCount);
+  }
+  case IITDescriptor::VecElementArgument: {
+    if (D.getArgumentNumber() >= ArgTys.size())
+      return true;
+    auto *ReferenceType = dyn_cast<VectorType>(ArgTys[D.getArgumentNumber()]);
+    return !ReferenceType || Ty != ReferenceType->getElementType();
   }
   }
   llvm_unreachable("unhandled");
@@ -3915,11 +4034,21 @@ void Verifier::visitIntrinsicCallSite(Intrinsic::ID ID, CallSite CS) {
   getIntrinsicInfoTableEntries(ID, Table);
   ArrayRef<Intrinsic::IITDescriptor> TableRef = Table;
 
+  // Walk the descriptors to extract overloaded types.
   SmallVector<Type *, 4> ArgTys;
-  Assert(!verifyIntrinsicType(IFTy->getReturnType(), TableRef, ArgTys),
+  addOverloadedArgTypes(IFTy->getReturnType(), TableRef, ArgTys);
+  for (unsigned i = 0, e = IFTy->getNumParams(); i != e; ++i)
+    addOverloadedArgTypes(IFTy->getParamType(i), TableRef, ArgTys);
+
+  // Reset ready for our second walk to validate the types.
+  unsigned ArgCount = 0;
+  TableRef = Table;
+  Assert(!verifyIntrinsicType(IFTy->getReturnType(), TableRef, ArgTys,
+                              ArgCount),
          "Intrinsic has incorrect return type!", IF);
   for (unsigned i = 0, e = IFTy->getNumParams(); i != e; ++i)
-    Assert(!verifyIntrinsicType(IFTy->getParamType(i), TableRef, ArgTys),
+    Assert(!verifyIntrinsicType(IFTy->getParamType(i), TableRef, ArgTys,
+                                ArgCount),
            "Intrinsic has incorrect argument type!", IF);
 
   // Verify if the intrinsic call matches the vararg property.
@@ -4481,8 +4610,10 @@ struct VerifierLegacyPass : public FunctionPass {
   }
 
   bool runOnFunction(Function &F) override {
-    if (!V.verify(F) && FatalErrors)
+    if (!V.verify(F) && FatalErrors) {
+      assert(0);
       report_fatal_error("Broken function found, compilation aborted!");
+    }
 
     return false;
   }

@@ -2518,7 +2518,7 @@ Instruction *InstCombiner::visitXor(BinaryOperator &I) {
   }
 
   if (Constant *RHS = dyn_cast<Constant>(Op1)) {
-    if (RHS->isAllOnesValue() && Op0->hasOneUse())
+    if ((RHS->isAllOnesValue() || match(RHS,m_AllOnes())) && Op0->hasOneUse())
       // xor (cmp A, B), true = not (cmp A, B) = !cmp A, B
       if (CmpInst *CI = dyn_cast<CmpInst>(Op0))
         return CmpInst::Create(CI->getOpcode(),

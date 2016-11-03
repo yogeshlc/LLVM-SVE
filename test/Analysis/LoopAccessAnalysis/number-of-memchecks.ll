@@ -100,11 +100,11 @@ for.end:                                          ; preds = %for.body
 ; CHECK-NEXT:         Member: {%c,+,4}
 ; CHECK-NEXT:     Group {{.*}}[[ONE]]:
 ; CHECK-NEXT:       (Low: %a High: (40 + %a))
-; CHECK-NEXT:         Member: {(2 + %a)<nsw>,+,2}
+; CHECK-NEXT:         Member: {(2 + %a)<nuw><nsw>,+,2}
 ; CHECK-NEXT:         Member: {%a,+,2}
 ; CHECK-NEXT:     Group {{.*}}[[TWO]]:
 ; CHECK-NEXT:       (Low: %b High: (38 + %b))
-; CHECK-NEXT:         Member: {%b,+,2}
+; CHECK-NEXT:         Member: {%b,+,2}<nsw>
 
 define void @testg(i16* %a,
                i16* %b,

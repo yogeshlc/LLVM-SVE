@@ -54,7 +54,9 @@ namespace llvm {
       t_Constant,                      // Value in ConstantVal.
       t_InlineAsm,                     // Value in FTy/StrVal/StrVal2/UIntVal.
       t_ConstantStruct,                // Value in ConstantStructElts.
-      t_PackedConstantStruct           // Value in ConstantStructElts.
+      t_PackedConstantStruct,          // Value in ConstantStructElts.
+      t_ElementCount,                  // Value in ConstantVal.
+      t_SeriesVector                   // Value in ConstantStructElts.
     } Kind = t_LocalID;
 
     LLLexer::LocTy Loc;
@@ -78,7 +80,8 @@ namespace llvm {
       if (Kind == t_LocalID || Kind == t_GlobalID)
         return UIntVal < RHS.UIntVal;
       assert((Kind == t_LocalName || Kind == t_GlobalName ||
-              Kind == t_ConstantStruct || Kind == t_PackedConstantStruct) &&
+              Kind == t_ConstantStruct || Kind == t_PackedConstantStruct ||
+              Kind == t_SeriesVector ) &&
              "Ordering not defined for this ValID kind yet");
       return StrVal < RHS.StrVal;
     }
@@ -462,6 +465,7 @@ namespace llvm {
     int ParseInstruction(Instruction *&Inst, BasicBlock *BB,
                          PerFunctionState &PFS);
     bool ParseCmpPredicate(unsigned &Pred, unsigned Opc);
+    bool ParseTestPredicate(TestInst::Predicate &Pred);
 
     bool ParseRet(Instruction *&Inst, BasicBlock *BB, PerFunctionState &PFS);
     bool ParseBr(Instruction *&Inst, PerFunctionState &PFS);
@@ -479,6 +483,7 @@ namespace llvm {
                          unsigned OperandType);
     bool ParseLogical(Instruction *&I, PerFunctionState &PFS, unsigned Opc);
     bool ParseCompare(Instruction *&I, PerFunctionState &PFS, unsigned Opc);
+    bool ParseTest(Instruction *&I, PerFunctionState &PFS);
     bool ParseCast(Instruction *&I, PerFunctionState &PFS, unsigned Opc);
     bool ParseSelect(Instruction *&I, PerFunctionState &PFS);
     bool ParseVA_Arg(Instruction *&I, PerFunctionState &PFS);
@@ -498,6 +503,9 @@ namespace llvm {
     int ParseGetElementPtr(Instruction *&I, PerFunctionState &PFS);
     int ParseExtractValue(Instruction *&I, PerFunctionState &PFS);
     int ParseInsertValue(Instruction *&I, PerFunctionState &PFS);
+    bool ParseElementCount(Instruction *&I, PerFunctionState &PFS);
+    bool ParseSeriesVector(Instruction *&I, PerFunctionState &PFS);
+    bool ParsePropFF(Instruction *&I, PerFunctionState &PFS);
 
     // Use-list order directives.
     bool ParseUseListOrder(PerFunctionState *PFS = nullptr);

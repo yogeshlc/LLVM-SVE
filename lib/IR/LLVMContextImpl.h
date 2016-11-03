@@ -1117,7 +1117,7 @@ public:
   unsigned NamedStructTypesUniqueID;
     
   DenseMap<std::pair<Type *, uint64_t>, ArrayType*> ArrayTypes;
-  DenseMap<std::pair<Type *, unsigned>, VectorType*> VectorTypes;
+  DenseMap<std::tuple<Type *, unsigned, unsigned>, VectorType*> VectorTypes;
   DenseMap<Type*, PointerType*> PointerTypes;  // Pointers in AddrSpace = 0
   DenseMap<std::pair<Type*, unsigned>, PointerType*> ASPointerTypes;
 

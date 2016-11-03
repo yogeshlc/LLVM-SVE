@@ -93,6 +93,11 @@ EnableA53Fix835769("aarch64-fix-cortex-a53-835769", cl::Hidden,
                 cl::desc("Work around Cortex-A53 erratum 835769"),
                 cl::init(false));
 
+static cl::opt<bool> LowerGatherScatterToInterleaved(
+    "sve-lower-gather-scatter-to-interleaved",
+    cl::desc("Enable lowering gather/scatters to interleaved intrinsics"),
+    cl::init(true), cl::Hidden);
+
 static cl::opt<bool>
 EnableGEPOpt("aarch64-gep-opt", cl::Hidden,
              cl::desc("Enable optimizations on complex GEPs"),
@@ -104,9 +109,21 @@ EnableGlobalMerge("aarch64-global-merge", cl::Hidden,
                   cl::desc("Enable the global merge pass"));
 
 static cl::opt<bool>
-    EnableLoopDataPrefetch("aarch64-loop-data-prefetch", cl::Hidden,
-                           cl::desc("Enable the loop data prefetch pass"),
-                           cl::init(true));
+EnableSVEPostVec("aarch64-sve-postvec", cl::init(true), cl::Hidden,
+                 cl::desc("Enable the SVE post vectorization pass."));
+
+// Enable the clean up of unnecessary setffr instruction planted when lowering
+// the load first-fault instructions
+static cl::opt<bool>
+EnableAArch64SetFFROptimize("aarch64-setffr-optimize", cl::Hidden,
+                            cl::desc("Remove unnecessary 'setffr'."),
+                            cl::init(false));
+
+
+static cl::opt<bool>
+EnableLoopDataPrefetch("aarch64-loop-data-prefetch", cl::Hidden,
+                       cl::desc("Enable the loop data prefetch pass"),
+                       cl::init(true));
 
 extern "C" void LLVMInitializeAArch64Target() {
   // Register the target.
@@ -301,6 +318,15 @@ void AArch64PassConfig::addIRPasses() {
   // ourselves.
   addPass(createAtomicExpandPass(TM));
 
+  // Make use of SVE intrinsics in place of common vector operations that span
+  // multiple basic blocks.
+  if (TM->getOptLevel() != CodeGenOpt::None && EnableSVEPostVec)
+    addPass(createSVEPostVectorizePass());
+
+  // Expand any SVE vector library calls that we can't code generate directly.
+  if (TM->getTargetFeatureString().count("sve"))
+    addPass(createSVEExpandLibCallPass());
+
   // Cmpxchg instructions are often used with a subsequent comparison to
   // determine whether it succeeded. We can exploit existing control-flow in
   // ldrex/strex loops to simplify this, but it needs tidying up.
@@ -320,6 +346,19 @@ void AArch64PassConfig::addIRPasses() {
   // Match interleaved memory accesses to ldN/stN intrinsics.
   if (TM->getOptLevel() != CodeGenOpt::None)
     addPass(createInterleavedAccessPass(TM));
+
+  // Match interleaved gathers and scatters to ldN/stN intrinsics
+  if (TM->getOptLevel() == CodeGenOpt::Aggressive &&
+      LowerGatherScatterToInterleaved) {
+    // Call EarlyCSE pass to ensure seriesvectors that looks the same are the
+    // same
+    addPass(createEarlyCSEPass());
+
+    addPass(createInterleavedGatherScatterPass(TM));
+
+    // Simplify the address calculation of any new interleaved accesses
+    addPass(createInstructionCombiningPass());
+  }
 
   if (TM->getOptLevel() == CodeGenOpt::Aggressive && EnableGEPOpt) {
     // Call SeparateConstOffsetFromGEP pass to extract constants within indices
@@ -354,6 +393,11 @@ bool AArch64PassConfig::addPreISel() {
 
   if (TM->getOptLevel() != CodeGenOpt::None)
     addPass(createAArch64AddressTypePromotionPass());
+
+  if (TM->getOptLevel() != CodeGenOpt::None && EnableSVEPostVec) {
+    addPass(createSVEAddressingModesPass());
+    addPass(createDeadCodeEliminationPass());
+  }
 
   return false;
 }
@@ -435,4 +479,7 @@ void AArch64PassConfig::addPreEmitPass() {
   if (TM->getOptLevel() != CodeGenOpt::None && EnableCollectLOH &&
       TM->getTargetTriple().isOSBinFormatMachO())
     addPass(createAArch64CollectLOHPass());
+
+  // SVE bundles move prefixes with destructive operations.
+  addPass(createUnpackMachineBundles(nullptr));
 }

@@ -1,5 +1,6 @@
 ; RUN: opt < %s -loop-vectorize -force-vector-width=4 -force-vector-interleave=1 -dce -instcombine -S | FileCheck %s
 ; RUN: opt < %s -loop-vectorize -force-vector-width=4 -force-vector-interleave=2 -dce -instcombine -S | FileCheck %s --check-prefix=UNROLL
+; RUN: opt < %s -mtriple aarch64-linux-generic -march=armv8-a -mattr=+sve -O3 -loop-vectorize -force-vector-width=4 -force-scalable-vectorization -enable-non-consecutive-stride-ind-vars -disable-loop-unrolling -S | FileCheck %s --check-prefix=SVE-CHECK
 
 target datalayout = "e-m:e-i64:64-i128:128-n32:64-S128"
 
@@ -36,6 +37,22 @@ target datalayout = "e-m:e-i64:64-i128:128-n32:64-S128"
 ;
 ; UNROLL: middle.block:
 ; UNROLL:   %vector.recur.extract = extractelement <4 x i32> [[L2]], i32 3
+;
+; SVE-CHECK-LABEL: @recurrence_1
+;
+; SVE-CHECK: vector.ph:
+; SVE-CHECK: %vector.recur.init = insertelement <n x 4 x i32> undef, i32 %pre_load, i32 sub (i32 elementcount (<n x 4 x i32> undef), i32 1)
+;
+; SVE-CHECK: vector.body:
+; SVE-CHECK: %vector.recur = phi <n x 4 x i32> [ %vector.recur.init, %vector.ph ], [ %wide.load, %vector.body ]
+; SVE-CHECK: %wide.load = load <n x 4 x i32>
+; SVE-CHECK: %{{[0-9]+}} = shufflevector <n x 4 x i32> %vector.recur, <n x 4 x i32> %wide.load, <n x 4 x i32> seriesvector (i32 sub (i32 elementcount (<n x 4 x i32> undef), i32 1), i32 1)
+;
+; SVE-CHECK: middle.block:
+; SVE-CHECK: %vector.recur.extract = extractelement <n x 4 x i32> %wide.load.lcssa, i32 sub (i32 elementcount (<n x 4 x i32> undef), i32 1)
+;
+; SVE-CHECK: scalar.body.preheader:
+; SVE-CHECK: %scalar.recur.ph = phi i32 [ %pre_load, %entry ], [ %pre_load, %min.iters.checked ], [ %pre_load, %vector.memcheck ], [ %vector.recur.extract, %middle.block ]
 ;
 define void @recurrence_1(i32* nocapture readonly %a, i32* nocapture %b, i32 %n) {
 entry:
@@ -169,6 +186,25 @@ scalar.body:
 ;
 ; UNROLL: middle.block:
 ; UNROLL:   %vector.recur.extract = extractelement <4 x i16> [[L2]], i32 3
+;
+; SVE-CHECK-LABEL: @recurrence_3
+;
+; SVE-CHECK: vector.ph:
+; SVE-CHECK: %vector.recur.init = insertelement <n x 4 x i16> undef, i16 %0, i32 sub (i32 elementcount (<n x 4 x i32> undef), i32 1)
+;
+; SVE-CHECK: vector.body:
+; SVE-CHECK: %vector.recur = phi <n x 4 x i16> [ %vector.recur.init, %vector.ph ], [ %wide.load, %vector.body ]
+; SVE-CHECK: %wide.load = load <n x 4 x i16>
+; SVE-CHECK: %{{[0-9]+}} = shufflevector <n x 4 x i16> %vector.recur, <n x 4 x i16> %wide.load, <n x 4 x i32> seriesvector (i32 sub (i32 elementcount (<n x 4 x i32> undef), i32 1), i32 1)
+;
+; SVE-CHECK: middle.block:
+; SVE-CHECK: %vector.recur.extract = extractelement <n x 4 x i16> %wide.load.lcssa, i32 sub (i32 elementcount (<n x 4 x i32> undef), i32 1)
+;
+; SVE-CHECK: scalar.body.preheader
+; SVE-CHECK: %scalar.recur.ph = phi i16 [ %0, %scalar.body.preheader ], [ %0, %min.iters.checked ], [ %0, %vector.memcheck ], [ %vector.recur.extract, %middle.block ]
+;
+; SVE-CHECK: scalar.body:
+; SVE-CHECK: %scalar.recur = phi i16 [ %{{[0-9]+}}, %scalar.body ], [ %scalar.recur.ph, %scalar.body.preheader
 ;
 define void @recurrence_3(i16* nocapture readonly %a, double* nocapture %b, i32 %n, float %f, i16 %p) {
 entry:

@@ -22,6 +22,7 @@
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
@@ -992,12 +993,14 @@ public:
     // Vector GEP
     if (Ptr->getType()->isVectorTy()) {
       unsigned NumElem = Ptr->getType()->getVectorNumElements();
-      return VectorType::get(PtrTy, NumElem);
+      bool Scalable = Ptr->getType()->getVectorIsScalable();
+      return VectorType::get(PtrTy, NumElem, Scalable);
     }
     for (Value *Index : IdxList)
       if (Index->getType()->isVectorTy()) {
         unsigned NumElem = Index->getType()->getVectorNumElements();
-        return VectorType::get(PtrTy, NumElem);
+        bool Scalable = Index->getType()->getVectorIsScalable();
+        return VectorType::get(PtrTy, NumElem, Scalable);
       }
     // Scalar GEP
     return PtrTy;
@@ -1338,6 +1341,71 @@ public:
   /// \brief Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Instruction *I) {
     return I->getOpcode() == Instruction::FCmp;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+};
+
+//===----------------------------------------------------------------------===//
+//                              TestInst Class
+//===----------------------------------------------------------------------===//
+
+/// TestInst - returns a boolean based on the comparision of its boolean or
+///            boolean vector operand
+class TestInst : public UnaryInstruction {
+protected:
+  // Note: Instruction needs to be a friend here to call cloneImpl.
+  friend class Instruction;
+  /// \brief Clone an identical TestInst
+  TestInst *cloneImpl() const;
+
+public:
+  enum Predicate {
+    ALL_FALSE   = 0,
+    ALL_TRUE    = 1,
+    ANY_FALSE   = 2,
+    ANY_TRUE    = 3,
+    FIRST_FALSE = 4,
+    FIRST_TRUE  = 5,
+    LAST_FALSE  = 6,
+    LAST_TRUE   = 7,
+    FIRST_TEST_PREDICATE = ALL_FALSE,
+    LAST_TEST_PREDICATE = LAST_TRUE,
+    BAD_TEST_PREDICATE = LAST_TEST_PREDICATE + 1
+  };
+
+  TestInst(Predicate P, Value *V, Instruction *InsertBefore = nullptr)
+  : UnaryInstruction(Type::getInt1Ty(V->getContext()), Test, V, InsertBefore) {
+    assert(isValidOperands(V) && "operand must be boolean or boolean vector");
+    setPredicate(P);
+  }
+
+  TestInst(Predicate P, Value *V, BasicBlock *InsertAtEnd)
+  : UnaryInstruction(Type::getInt1Ty(V->getContext()), Test, V, InsertAtEnd) {
+    assert(isValidOperands(V) && "operand must be boolean or boolean vector");
+    setPredicate(P);
+  }
+
+  /// isValidOperands - Return true if a test instruction can be
+  /// formed with the specified operands.
+  static bool isValidOperands(const Value *V) {
+    return V->getType()->getScalarType()->isIntegerTy(1);
+  }
+
+  /// @brief Return the predicate for this instruction.
+  Predicate getPredicate() const {
+    return Predicate(getSubclassDataFromInstruction());
+  }
+
+  /// @brief Set the predicate for this instruction to the specified value.
+  void setPredicate(Predicate P) {
+    setInstructionSubclassData(P);
+  }
+
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const Instruction *I) {
+    return I->getOpcode() == Instruction::Test;
   }
   static inline bool classof(const Value *V) {
     return isa<Instruction>(V) && classof(cast<Instruction>(V));
@@ -2131,7 +2199,7 @@ public:
   }
   ShuffleVectorInst(Value *V1, Value *V2, Value *Mask,
                     const Twine &NameStr = "",
-                    Instruction *InsertBefor = nullptr);
+                    Instruction *InsertBefore = nullptr);
   ShuffleVectorInst(Value *V1, Value *V2, Value *Mask,
                     const Twine &NameStr, BasicBlock *InsertAtEnd);
 
@@ -2149,32 +2217,32 @@ public:
   /// Transparently provide more efficient getOperand methods.
   DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
 
-  Constant *getMask() const {
-    return cast<Constant>(getOperand(2));
+  Value *getMask() const {
+    return getOperand(2);
   }
 
   /// getMaskValue - Return the index from the shuffle mask for the specified
   /// output result.  This is either -1 if the element is undef or a number less
   /// than 2*numelements.
-  static int getMaskValue(Constant *Mask, unsigned i);
+  static bool getMaskValue(Value *Mask, unsigned i, int &Result);
 
-  int getMaskValue(unsigned i) const {
-    return getMaskValue(getMask(), i);
+  bool getMaskValue(unsigned i, int &Result) const {
+    return getMaskValue(getMask(), i, Result);
   }
 
   /// getShuffleMask - Return the full mask for this instruction, where each
   /// element is the element number and undef's are returned as -1.
-  static void getShuffleMask(Constant *Mask, SmallVectorImpl<int> &Result);
+  static bool getShuffleMask(Value *Mask, SmallVectorImpl<int> &Result);
 
-  void getShuffleMask(SmallVectorImpl<int> &Result) const {
+  bool getShuffleMask(SmallVectorImpl<int> &Result) const {
     return getShuffleMask(getMask(), Result);
   }
 
-  SmallVector<int, 16> getShuffleMask() const {
-    SmallVector<int, 16> Mask;
-    getShuffleMask(Mask);
-    return Mask;
-  }
+  /// findBroadcastElement - If all defined elements of the mask specify
+  /// the same element, return that element, otherwise return -1.
+  static int findBroadcastElement(Value *Mask);
+
+  int findBroadcastElement() const { return findBroadcastElement(getMask()); }
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
   static inline bool classof(const Instruction *I) {
@@ -2191,6 +2259,135 @@ struct OperandTraits<ShuffleVectorInst> :
 };
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ShuffleVectorInst, Value)
+
+//===----------------------------------------------------------------------===//
+//                           ElementCountInst Class
+//===----------------------------------------------------------------------===//
+
+/// ElementCountInst - the number of elements contained within its input
+///
+class ElementCountInst : public UnaryInstruction {
+protected:
+  // Note: Instruction needs to be a friend here to call cloneImpl.
+  friend class Instruction;
+  /// \brief Clone an identical ElementCountInst
+  ElementCountInst *cloneImpl() const;
+
+public:
+  ElementCountInst(Type *Ty,
+                   Value *V, // the element container
+                   Instruction *InsertBefore = nullptr);
+  ElementCountInst(Type *Ty,
+                   Value *V, // the element container
+                   BasicBlock *InsertAtEnd);
+
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const Instruction *I) {
+    return I->getOpcode() == Instruction::ElementCount;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+};
+
+//===----------------------------------------------------------------------===//
+//                           SeriesVectorInst Class
+//===----------------------------------------------------------------------===//
+
+/// SeriesVectorInst - a vector containing the specified arithmetic series
+///
+class SeriesVectorInst : public Instruction {
+protected:
+  // Note: Instruction needs to be a friend here to call cloneImpl.
+  friend class Instruction;
+  /// \brief Clone an identical SeriesVectorInst
+  SeriesVectorInst *cloneImpl() const;
+
+public:
+  enum {
+    NoUnsignedWrap = (1 << 0),
+    NoSignedWrap   = (1 << 1)
+  };
+
+  // allocate space for exactly two operands
+  void *operator new(size_t s) {
+    return User::operator new(s, 2);
+  }
+
+  // Instruction for an arithmetic series using c style semantics
+  //   (i.e. start, start+step, start+2*step...)
+  SeriesVectorInst(Value *Start,
+                   Value *Step,
+                   VectorType::ElementCount EC,
+                   Instruction *InsertBefore = nullptr)
+    : SeriesVectorInst(VectorType::get(Start->getType(), EC),
+                       Start, Step, InsertBefore) {}
+
+  // Instruction for an arithmetic series using c style semantics
+  //   (i.e. start, start+step, start+2*step...)
+  SeriesVectorInst(Value *Start,
+                   Value *Step,
+                   VectorType::ElementCount EC,
+                   BasicBlock *InsertAtEnd)
+  : SeriesVectorInst(VectorType::get(Start->getType(), EC),
+                     Start, Step, InsertAtEnd) {}
+
+  // Instruction for an arithmetic series using c style semantics
+  //   (i.e. start, start+step, start+2*step...)
+  SeriesVectorInst(Type *Ty, Value *Start, Value *Step,
+                   Instruction *InsertBefore = nullptr);
+  // Instruction for an arithmetic series using c style semantics
+  //   (i.e. start, start+step, start+2*step...)
+  SeriesVectorInst(Type *Ty, Value *Start, Value *Step,
+                   BasicBlock *InsertAtEnd);
+
+  // SeriesVector is not a binary operator because the result's type differs
+  // from the operands. This necessitates the duplication of the NSW/NUW flag
+  // interface for this instruction.
+  void setHasNoSignedWrap(bool B = true) {
+    SubclassOptionalData =
+      (SubclassOptionalData & ~NoSignedWrap) | (B * NoSignedWrap);
+  }
+  void setHasNoUnsignedWrap(bool B = true) {
+    SubclassOptionalData =
+      (SubclassOptionalData & ~NoUnsignedWrap) | (B * NoUnsignedWrap);
+  }
+
+  bool hasNoSignedWrap() const {
+    return SubclassOptionalData & NoSignedWrap;
+  }
+
+  bool hasNoUnsignedWrap() const {
+    return SubclassOptionalData & NoUnsignedWrap;
+  }
+
+  /// isValidOperands - Return true if a seriesvector instruction can be
+  /// formed with the specified operands.
+  static bool isValidOperands(const Value *Start, const Value *Step);
+
+  /// getType - Overload to return most specific vector type.
+  VectorType *getType() const {
+    return cast<VectorType>(Instruction::getType());
+  }
+
+  /// Transparently provide more efficient getOperand methods.
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const Instruction *I) {
+    return I->getOpcode() == Instruction::SeriesVector;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+};
+
+template <>
+struct OperandTraits<SeriesVectorInst> :
+  public FixedNumOperandTraits<SeriesVectorInst, 2> {
+};
+
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SeriesVectorInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                                ExtractValueInst Class
@@ -4890,6 +5087,68 @@ public:
     return getType()->getPointerAddressSpace();
   }
 };
+
+//===----------------------------------------------------------------------===//
+//                           PropFFInst Class
+//===----------------------------------------------------------------------===//
+
+/// PropFFInst - propagate the first zero element across all later elements.
+///
+class PropFFInst : public Instruction {
+protected:
+  // Note: Instruction needs to be a friend here to call cloneImpl.
+  friend class Instruction;
+  /// \brief Clone an identical PropFFInst
+  PropFFInst *cloneImpl() const;
+
+public:
+  // allocate space for exactly two operands
+  void *operator new(size_t s) {
+    return User::operator new(s, 2);
+  }
+
+  /// \brief Constructor with insert-before-instruction semantics
+  PropFFInst(
+    Value *Op1,                   ///< The predicate value to propagate from.
+    Value *Op2,                   ///< The second predicate to propagate to.
+    const Twine &NameStr = "",          ///< A name for the new instruction
+    Instruction *InsertBefore = nullptr ///< Where to insert the instruction
+  );
+
+  /// \brief Constructor with insert-at-end-of-block semantics
+  PropFFInst(
+    Value *Op1,                 ///< The predicate value to propagate from.
+    Value *Op2,                 ///< The second predicate to propagate to.
+    const Twine &NameStr,       ///< A name for the new instruction
+    BasicBlock *InsertAtEnd     ///< The block to insert the instruction into
+  );
+
+  /// isValidOperands - Return true if an propff instruction can be
+  /// formed with the specified operands.
+  static bool isValidOperands(Value *Op1, Value *Op2) {
+    auto *Ty1 = dyn_cast<VectorType>(Op1->getType());
+    auto *Ty2 = dyn_cast<VectorType>(Op2->getType());
+    return Ty1 && (Ty1 == Ty2) && Ty1->getElementType()->isIntegerTy(1);
+  }
+
+  /// Transparently provide more efficient getOperand methods.
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const Instruction *I) {
+    return I->getOpcode() == Instruction::PropFF;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+};
+
+template <>
+struct OperandTraits<PropFFInst> :
+  public FixedNumOperandTraits<PropFFInst, 2> {
+};
+
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(PropFFInst, Value)
 
 } // End llvm namespace
 

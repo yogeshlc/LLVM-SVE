@@ -35,6 +35,10 @@ Pass *MachineFunctionPass::createPrinterPass(raw_ostream &O,
   return createMachineFunctionPrinterPass(O, Banner);
 }
 
+Pass *MachineFunctionPass::createBlamePass(const std::string &PassName) const {
+  return createMachineFunctionBlamePass(PassName);
+}
+
 bool MachineFunctionPass::runOnFunction(Function &F) {
   // Do not codegen any 'available_externally' functions at all, they have
   // definitions outside the translation unit.

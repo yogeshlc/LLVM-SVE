@@ -29,6 +29,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/DataTypes.h"
+#include "llvm/Transforms/Utils/LoopUtils.h"
 #include <functional>
 
 namespace llvm {
@@ -54,6 +55,117 @@ struct MemIntrinsicInfo {
   unsigned short MatchingId;
   int NumMemRefs;
   Value *PtrVal;
+};
+
+/// \brief Information about the memory access pattern for a given
+/// load/store instruction.
+class MemAccessInfo {
+public:
+  enum MemAccessInfoType {
+    UNIFORM = 0,
+    STRIDED = 1,
+    NONSTRIDED = 2
+  };
+
+private:
+  // The type of access (uniform, strided, gather/scatter)
+  MemAccessInfoType Access;
+
+  // Predicated access
+  bool IsMasked;
+
+  struct StridedInfoStruct {
+    int   Stride;
+    bool  IsReversed;
+  };
+
+  struct NonStridedInfoStruct {
+    Type *IndexType;
+    bool  IsSignedIndex;
+  };
+
+  // Access-specific information
+  union {
+    struct StridedInfoStruct    StridedInfo;
+    struct NonStridedInfoStruct NonStridedInfo;
+  };
+
+  // Privater constructors
+  MemAccessInfo () : Access(UNIFORM), IsMasked(false) {}
+
+  MemAccessInfo (int stride, bool isReversed, bool isMasked) :
+        Access(STRIDED), IsMasked(isMasked) {
+    StridedInfo.Stride = stride;
+    StridedInfo.IsReversed = isReversed;
+  }
+
+  MemAccessInfo (Type *idxType, bool isSignedIndex, bool isMasked) :
+        Access(NONSTRIDED), IsMasked(isMasked) {
+    NonStridedInfo.IsSignedIndex = isSignedIndex;
+    NonStridedInfo.IndexType = idxType;
+  }
+
+public:
+  // Static methods to create a MemAccessInfo
+  static MemAccessInfo getUniformInfo() {
+    return MemAccessInfo();
+  }
+
+  static MemAccessInfo getStridedInfo(int stride, bool isReversed,
+                                      bool isMasked) {
+    return MemAccessInfo(stride, isReversed, isMasked);
+  }
+
+  static MemAccessInfo getNonStridedInfo(Type *idxType, bool isMasked,
+                                         bool isSignedIdx = true) {
+    return MemAccessInfo(idxType, isSignedIdx, isMasked);
+  }
+
+  // Accessor methods
+  MemAccessInfoType getAccessType() const {
+    return Access;
+  }
+
+  bool isStrided() const {
+    return Access == STRIDED;
+  }
+
+  bool isUniform() const {
+    return Access == UNIFORM;
+  }
+
+  bool isNonStrided() const {
+    return Access == NONSTRIDED;
+  }
+
+  bool isMasked() const {
+    assert(!(IsMasked && isUniform()) &&
+           "Uniform access cannot be predicated");
+    return IsMasked;
+  }
+
+  bool isReversed() const {
+    assert(isStrided() &&
+           "Cannot get reversed stride from non-strided access");
+    return StridedInfo.IsReversed;
+  }
+
+  int getStride() const {
+    assert(isStrided() &&
+           "Cannot get stride from non-strided access");
+    return StridedInfo.Stride;
+  }
+
+  Type *getIndexType() const {
+    assert(isNonStrided() &&
+           "Cannot get index type of non-gather/scatter access");
+    return NonStridedInfo.IndexType;
+  }
+
+  bool isSignedIndex() const {
+    assert(isNonStrided() && "Expecting a non-strided access");
+    return NonStridedInfo.IsSignedIndex;
+  }
 };
 
 /// \brief This pass provides access to the codegen interfaces that are needed
@@ -449,6 +561,13 @@ public:
   /// This is currently measured in number of instructions.
   unsigned getPrefetchDistance() const;
 
+  /// \return The width of the largest possible register supported by the target
+  /// architecture.  This is an upper bound rather than its actual width. The
+  /// lower bound (returned by getRegisterBitWidth) is the more common question
+  /// to ask but for cases when a transform is only safe when the register is
+  /// smaller than X, this function should be used.
+  unsigned getRegisterBitWidthUpperBound(bool Vector) const;
+
   /// \return Some HW prefetchers can handle accesses up to a certain constant
   /// stride.  This is the minimum stride in bytes where it makes sense to start
   /// adding SW prefetches.  The default is 1, i.e. prefetch with any stride.
@@ -501,6 +620,12 @@ public:
   /// \return The cost of Load and Store instructions.
   int getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
                       unsigned AddressSpace) const;
+
+  // \return The cost of Load and Store instructions for
+  // a memory access pattern described by Info.
+  unsigned getVectorMemoryOpCost(unsigned Opcode, Type *Src, Value *Ptr,
+                                 unsigned Alignment, unsigned AddressSpace,
+                                 const MemAccessInfo &Info) const;
 
   /// \return The cost of masked Load and Store instructions.
   int getMaskedMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
@@ -587,10 +712,64 @@ public:
   Value *getOrCreateResultFromMemIntrinsic(IntrinsicInst *Inst,
                                            Type *ExpectedType) const;
 
+  /// \returns True if the target has instructions for a load/store with
+  /// an access pattern described by Info.
+  /// \param Ty is the result (load) or operand (store) type of the
+  /// memory operation.
+  /// \param Info is a struct that describes the memory access
+  /// (strided,gather,uniform)
+  bool hasVectorMemoryOp(unsigned Opcode, Type *Ty, 
+                         const MemAccessInfo &Info) const;
+
+  /// \returns True if the target has an intrinsic to perform the reduction.
+  bool canReduceInVector(const RecurrenceDescriptor &Desc, bool NoNaN) const;
+
+  /// \brief Query the availablity of a target intrinsic that can reduce a
+  ///        vector down to a scalar. This interface makes no guarantee as to
+  ///        the order in which elements are processed during the reduction.
+  /// \returns A value which is the result of the given reduction or nullptr
+  ///          when no such intrinsic is available.
+  /// \param Builder is used to create the intrinsic.
+  /// \param Desc describes the reduction operation (e.g. add/mul/min/max).
+  /// \param NoNaN tells the function that it can be assumed that there are no
+  ///        NaNs in Src vector.
+  /// \param Src is the vector to reduce horizontally.
+  Value* getReductionIntrinsic(IRBuilder<> &Builder,
+                               const RecurrenceDescriptor& Desc, bool NoNaN,
+                               Value* Src) const;
+
+  /// \brief Query the availablity of a target intrinsic that can reduce a
+  ///        vector down to a scalar. This interface guarantees the order
+  ///        in which elements are processed during the reduction.
+  /// \returns A value which is the result of the given reduction or nullptr
+  ///          when no such intrinsic is available.
+  /// \param Builder is used to create the intrinsic.
+  /// \param Desc describes the reduction operation (e.g. add/mul/min/max).
+  /// \param NoNaN tells the function that it can be assumed that there are no
+  ///        NaNs in Src vector.
+  /// \param Src is the vector to reduce horizontally.
+  /// \param Start is the optional start value for the reduction
+  /// \param Predicate is the optional predicate to apply on Src
+  Value* getOrderedReductionIntrinsic(IRBuilder<> &Builder,
+                               const RecurrenceDescriptor& Desc, bool NoNaN,
+                               Value* Src, Value *Start,
+                               Value *Predicate) const;
+
+
   /// \returns True if the two functions have compatible attributes for inlining
   /// purposes.
   bool areInlineCompatible(const Function *Caller,
                            const Function *Callee) const;
+  /// \returns True if the target can efficiently support vectorized non-unit
+  //           strides.
+  bool canVectorizeNonUnitStrides(bool forceFixedWidth = false) const;
+
+  /// \returns True if the target can efficiently handle store->loads
+  /// even when forwarding is prevented by the address not being a multiple
+  /// of the VF. For vector architectures with predication and unaligned
+  /// memory access, the benefit of vectorization may still outweigh
+  /// the cost for lack of store-load forwarding.
+  bool vectorizePreventedSLForwarding(void) const;
 
   /// @}
 
@@ -661,6 +840,7 @@ public:
   virtual unsigned getRegisterBitWidth(bool Vector) = 0;
   virtual unsigned getCacheLineSize() = 0;
   virtual unsigned getPrefetchDistance() = 0;
+  virtual unsigned getRegisterBitWidthUpperBound(bool Vector) = 0;
   virtual unsigned getMinPrefetchStride() = 0;
   virtual unsigned getMaxPrefetchIterationsAhead() = 0;
   virtual unsigned getMaxInterleaveFactor(unsigned VF) = 0;
@@ -681,6 +861,10 @@ public:
                                  unsigned Index) = 0;
   virtual int getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
                               unsigned AddressSpace) = 0;
+  virtual unsigned getVectorMemoryOpCost(unsigned Opcode, Type *Src, Value *Ptr,
+                                         unsigned Alignment,
+                                         unsigned AddressSpace,
+                                         const MemAccessInfo &Info) = 0;
   virtual int getMaskedMemoryOpCost(unsigned Opcode, Type *Src,
                                     unsigned Alignment,
                                     unsigned AddressSpace) = 0;
@@ -709,8 +893,26 @@ public:
                                   MemIntrinsicInfo &Info) = 0;
   virtual Value *getOrCreateResultFromMemIntrinsic(IntrinsicInst *Inst,
                                                    Type *ExpectedType) = 0;
+  virtual bool canReduceInVector(const RecurrenceDescriptor &Desc,
+                                 bool NoNaN) = 0;
+
+  virtual bool hasVectorMemoryOp(unsigned Opcode, Type *Ty,
+                                 const MemAccessInfo &Info) = 0;
+
+  virtual Value* getReductionIntrinsic(IRBuilder<> &Builder,
+                                       const RecurrenceDescriptor& Desc,
+                                       bool NoNaN, Value *Src) = 0;
+
+  virtual Value* getOrderedReductionIntrinsic(IRBuilder<> &Builder,
+                                       const RecurrenceDescriptor& Desc,
+                                       bool NoNaN, Value *Src,
+                                       Value *Start, Value *Predicate) = 0;
+
   virtual bool areInlineCompatible(const Function *Caller,
                                    const Function *Callee) const = 0;
+
+  virtual bool canVectorizeNonUnitStrides(bool forceFixedWidth) = 0;
+  virtual bool vectorizePreventedSLForwarding(void) = 0;
 };
 
 template <typename T>
@@ -839,6 +1041,9 @@ public:
   unsigned getRegisterBitWidth(bool Vector) override {
     return Impl.getRegisterBitWidth(Vector);
   }
+  unsigned getRegisterBitWidthUpperBound(bool Vector) override {
+    return Impl.getRegisterBitWidthUpperBound(Vector);
+  }
   unsigned getCacheLineSize() override {
     return Impl.getCacheLineSize();
   }
@@ -883,6 +1088,12 @@ public:
   int getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
                       unsigned AddressSpace) override {
     return Impl.getMemoryOpCost(Opcode, Src, Alignment, AddressSpace);
+  }
+  unsigned getVectorMemoryOpCost(unsigned Opcode, Type *Src, Value *Ptr,
+                                 unsigned Alignment, unsigned AddressSpace,
+                                 const MemAccessInfo &Info) override {
+    return Impl.getVectorMemoryOpCost(Opcode, Src, Ptr, Alignment, AddressSpace,
+                                      Info);
   }
   int getMaskedMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
                             unsigned AddressSpace) override {
@@ -934,9 +1145,40 @@ public:
                                            Type *ExpectedType) override {
     return Impl.getOrCreateResultFromMemIntrinsic(Inst, ExpectedType);
   }
+  bool canReduceInVector(const RecurrenceDescriptor &Desc, bool NoNaN) override{
+    return Impl.canReduceInVector(Desc, NoNaN);
+  }
+
+  bool hasVectorMemoryOp(unsigned Opcode, Type *Ty,
+                         const MemAccessInfo &Info) override {
+    return Impl.hasVectorMemoryOp(Opcode, Ty, Info);
+  }
+
+  Value* getReductionIntrinsic(IRBuilder<> &Builder,
+                               const RecurrenceDescriptor& Desc, bool NoNaN,
+                               Value *Src) override {
+    return Impl.getReductionIntrinsic(Builder, Desc, NoNaN, Src);
+  }
+
+  Value* getOrderedReductionIntrinsic(IRBuilder<> &Builder,
+                               const RecurrenceDescriptor& Desc, bool NoNaN,
+                               Value *Src, Value *Start,
+                               Value *Predicate) override {
+    return Impl.getOrderedReductionIntrinsic(Builder, Desc, NoNaN, Src, Start,
+                                             Predicate);
+  }
+
   bool areInlineCompatible(const Function *Caller,
                            const Function *Callee) const override {
     return Impl.areInlineCompatible(Caller, Callee);
+  }
+
+  bool canVectorizeNonUnitStrides(bool forceFixedWidth = false) override {
+    return Impl.canVectorizeNonUnitStrides(forceFixedWidth);
+  }
+
+  bool vectorizePreventedSLForwarding(void) override {
+    return Impl.vectorizePreventedSLForwarding();
   }
 };
 

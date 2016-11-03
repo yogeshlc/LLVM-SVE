@@ -75,7 +75,7 @@ public:
   /// \name Vector TTI Implementations
   /// @{
 
-  bool enableInterleavedAccessVectorization() { return true; }
+  bool enableInterleavedAccessVectorization() { return !ST->hasSVE(); }
 
   unsigned getNumberOfRegisters(bool Vector) {
     if (Vector) {
@@ -93,6 +93,12 @@ public:
       return 0;
     }
     return 64;
+  }
+
+  unsigned getRegisterBitWidthUpperBound(bool Vector) {
+    if (Vector && ST->hasSVE())
+      return AArch64::SVEMaxBitsPerVector;
+    return getRegisterBitWidth(Vector);
   }
 
   unsigned getMaxInterleaveFactor(unsigned VF);
@@ -127,9 +133,50 @@ public:
 
   bool getTgtMemIntrinsic(IntrinsicInst *Inst, MemIntrinsicInfo &Info);
 
+  bool canReduceInVector(const RecurrenceDescriptor &Desc, bool NoNaN);
+  Value* getReductionIntrinsic(IRBuilder<> &Builder,
+                               const RecurrenceDescriptor &Desc, bool NoNaN,
+                               Value *Src);
+  Value* getOrderedReductionIntrinsic(IRBuilder<> &Builder,
+                                      const RecurrenceDescriptor &Desc,
+                                      bool NoNaN, Value *Src, Value * Start,
+                                      Value *Predicate);
+
+  bool isLegalMaskedLoad(Type *DataType) {
+    return ST->hasSVE();
+  }
+  bool isLegalMaskedStore(Type *DataType) {
+    return ST->hasSVE();
+  }
+  bool isLegalMaskedGather(Type *DataType) {
+    return ST->hasSVE();
+  }
+  bool isLegalMaskedScatter(Type *DataType) {
+    return ST->hasSVE();
+  }
+  bool hasVectorMemoryOp(unsigned Opcode, Type *Ty, const MemAccessInfo &Info) {
+    if (ST->hasSVE())
+      return true;
+    return BaseT::hasVectorMemoryOp(Opcode, Ty, Info);
+  }
+
+  unsigned getVectorMemoryOpCost(unsigned Opcode, Type *Src, Value *Ptr,
+                                 unsigned Alignment, unsigned AddressSpace,
+                                 const MemAccessInfo &Info);
+
   int getInterleavedMemoryOpCost(unsigned Opcode, Type *VecTy, unsigned Factor,
                                  ArrayRef<unsigned> Indices, unsigned Alignment,
                                  unsigned AddressSpace);
+
+  bool canVectorizeNonUnitStrides(bool forceFixedWidth = false) {
+    if (forceFixedWidth)
+      return false;
+    return ST->hasSVE();
+  }
+
+  bool vectorizePreventedSLForwarding(void) {
+    return ST->hasSVE();
+  }
 
   unsigned getCacheLineSize();
 

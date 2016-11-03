@@ -281,6 +281,7 @@ bool AArch64AsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNum,
     case 's': // Print S register.
     case 'd': // Print D register.
     case 'q': // Print Q register.
+    case 'z': // Print Z register.
       if (MO.isReg()) {
         const TargetRegisterClass *RC;
         switch (ExtraCode[0]) {
@@ -298,6 +299,9 @@ bool AArch64AsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNum,
           break;
         case 'q':
           RC = &AArch64::FPR128RegClass;
+          break;
+        case 'z':
+          RC = &AArch64::ZPRRegClass;
           break;
         default:
           return true;
@@ -319,9 +323,21 @@ bool AArch64AsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNum,
         AArch64::GPR64allRegClass.contains(Reg))
       return printAsmMRegister(MO, 'x', O);
 
+    bool hasAltName;
+    const TargetRegisterClass *RegClass;
+    if (AArch64::ZPRRegClass.contains(Reg)) {
+      RegClass = &AArch64::ZPRRegClass;
+      hasAltName = false;
+    } else if (AArch64::PPRRegClass.contains(Reg)) {
+      RegClass = &AArch64::PPRRegClass;
+      hasAltName = false;
+    } else {
+      RegClass = &AArch64::FPR128RegClass;
+      hasAltName = true;
+    }
+
     // If this is a b, h, s, d, or q register, print it as a v register.
-    return printAsmRegInClass(MO, &AArch64::FPR128RegClass, true /* vector */,
-                              O);
+    return printAsmRegInClass(MO, RegClass, hasAltName /* vector */, O);
   }
 
   printOperand(MI, OpNum, O);

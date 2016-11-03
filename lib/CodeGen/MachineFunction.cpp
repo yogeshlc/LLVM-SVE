@@ -684,6 +684,8 @@ unsigned MachineFrameInfo::estimateStackSize(const MachineFunction &MF) const {
   for (unsigned i = 0, e = getObjectIndexEnd(); i != e; ++i) {
     if (isDeadObjectIndex(i))
       continue;
+    if (MF.getFrameInfo()->getObjectRegion(i) != nullptr)
+      continue;
     Offset += getObjectSize(i);
     unsigned Align = getObjectAlignment(i);
     // Adjust to alignment boundary
@@ -757,6 +759,18 @@ void MachineFrameInfo::dump(const MachineFunction &MF) const {
   print(MF, dbgs());
 }
 #endif
+
+//===----------------------------------------------------------------------===//
+//  StackRegion implementation
+//===----------------------------------------------------------------------===//
+
+void StackRegion::addObject(MachineFrameInfo &MFI, int FrameIndex) {
+  MFI.setObjectRegion(FrameIndex, this);
+}
+
+void StackRegion::removeObject(MachineFrameInfo &MFI, int FrameIndex) {
+  MFI.setObjectRegion(FrameIndex, nullptr);
+}
 
 //===----------------------------------------------------------------------===//
 //  MachineJumpTableInfo implementation

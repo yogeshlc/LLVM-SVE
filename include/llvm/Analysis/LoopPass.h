@@ -35,6 +35,10 @@ public:
   Pass *createPrinterPass(raw_ostream &O,
                           const std::string &Banner) const override;
 
+  /// createBlamePass - Get a pass that tags all untagged instructions
+  /// with the name of the pass that created them.
+  Pass *createBlamePass(const std::string &PassName) const override;
+
   // runOnLoop - This method should be implemented by the subclass to perform
   // whatever action is necessary for the specified Loop.
   virtual bool runOnLoop(Loop *L, LPPassManager &LPM) = 0;

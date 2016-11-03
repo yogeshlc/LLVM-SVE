@@ -51,6 +51,34 @@ struct MachineFunctionPrinterPass : public MachineFunctionPass {
 };
 
 char MachineFunctionPrinterPass::ID = 0;
+
+class MachineFunctionBlamePass : public MachineFunctionPass {
+  const std::string PassName;
+
+public:
+  static char ID;
+  MachineFunctionBlamePass() : MachineFunctionPass(ID) {}
+  MachineFunctionBlamePass(const std::string &PassName)
+    : MachineFunctionPass(ID), PassName(PassName) {}
+
+  const char *getPassName() const override { return "MachineFunction Blamer"; }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesAll();
+    MachineFunctionPass::getAnalysisUsage(AU);
+  }
+
+  bool runOnMachineFunction(MachineFunction &MF) override {
+    // TODO: When we update to a newer community base, we may
+    // wish to implement this properly to tag machine IR. In
+    // the current codebase we can't do this, so just warn
+    // if anyone tries to perform codegen with blaming.
+    errs() << "Would blame machine function pass\n";
+    return false;
+  }
+};
+
+char MachineFunctionBlamePass::ID = 0;
 }
 
 char &llvm::MachineFunctionPrinterPassID = MachineFunctionPrinterPass::ID;
@@ -64,6 +92,10 @@ namespace llvm {
 MachineFunctionPass *createMachineFunctionPrinterPass(raw_ostream &OS,
                                                       const std::string &Banner){
   return new MachineFunctionPrinterPass(OS, Banner);
+}
+
+MachineFunctionPass *createMachineFunctionBlamePass(const std::string &PassName){
+  return new MachineFunctionBlamePass(PassName);
 }
 
 }

@@ -201,7 +201,12 @@ enum IIT_Info {
   IIT_VEC_OF_PTRS_TO_ELT = 33,
   IIT_I128 = 34,
   IIT_V512 = 35,
-  IIT_V1024 = 36
+  IIT_V1024 = 36,
+  IIT_SCALABLE_VEC = 37,
+  IIT_VEC_ELEMENT = 38,
+  IIT_VEC_OF_BITCASTS_TO_INT = 39,
+  IIT_DOUBLE_VEC_ARG = 40,
+  IIT_UNPACK_ARG = 41
 };
 
 
@@ -239,7 +244,9 @@ static void EncodeFixedValueType(MVT::SimpleValueType VT,
 #pragma optimize("",off) // MSVC 2010 optimizer can't deal with this function.
 #endif
 
-static void EncodeFixedType(Record *R, std::vector<unsigned char> &ArgCodes,
+static void EncodeFixedType(Record *R,
+                            const std::vector<unsigned char> &ArgCodes,
+                            unsigned &NextArgCode,
                             std::vector<unsigned char> &Sig) {
 
   if (R->isSubClassOf("LLVMMatchType")) {
@@ -260,8 +267,16 @@ static void EncodeFixedType(Record *R, std::vector<unsigned char> &ArgCodes,
     }
     else if (R->isSubClassOf("LLVMPointerTo"))
       Sig.push_back(IIT_PTR_TO_ARG);
+    else if (R->isSubClassOf("LLVMVectorOfBitcastsToInt"))
+      Sig.push_back(IIT_VEC_OF_BITCASTS_TO_INT);
     else if (R->isSubClassOf("LLVMVectorOfPointersToElt"))
       Sig.push_back(IIT_VEC_OF_PTRS_TO_ELT);
+    else if (R->isSubClassOf("LLVMVectorElementType"))
+      Sig.push_back(IIT_VEC_ELEMENT);
+    else if (R->isSubClassOf("LLVMDoubleElementsVectorType"))
+      Sig.push_back(IIT_DOUBLE_VEC_ARG);
+    else if (R->isSubClassOf("LLVMUnpackType"))
+      Sig.push_back(IIT_UNPACK_ARG);
     else
       Sig.push_back(IIT_ARG);
     return Sig.push_back((Number << 3) | ArgCodes[Number]);
@@ -282,8 +297,9 @@ static void EncodeFixedType(Record *R, std::vector<unsigned char> &ArgCodes,
     Sig.push_back(IIT_ARG);
 
     // Figure out what arg # this is consuming, and remember what kind it was.
-    unsigned ArgNo = ArgCodes.size();
-    ArgCodes.push_back(Tmp);
+    assert(NextArgCode < ArgCodes.size() && ArgCodes[NextArgCode] == Tmp &&
+           "Invalid or no ArgCode associated with overloaded VT!");
+    unsigned ArgNo = NextArgCode++;
 
     // Encode what sort of argument it must be in the low 3 bits of the ArgNo.
     return Sig.push_back((ArgNo << 3) | Tmp);
@@ -301,12 +317,14 @@ static void EncodeFixedType(Record *R, std::vector<unsigned char> &ArgCodes,
     } else {
       Sig.push_back(IIT_PTR);
     }
-    return EncodeFixedType(R->getValueAsDef("ElTy"), ArgCodes, Sig);
+    return EncodeFixedType(R->getValueAsDef("ElTy"), ArgCodes, NextArgCode, Sig);
   }
   }
 
   if (MVT(VT).isVector()) {
     MVT VVT = VT;
+    if (VVT.isScalableVector())
+      Sig.push_back(IIT_SCALABLE_VEC);
     switch (VVT.getVectorNumElements()) {
     default: PrintFatalError("unhandled vector type width in intrinsic!");
     case 1: Sig.push_back(IIT_V1); break;
@@ -326,6 +344,24 @@ static void EncodeFixedType(Record *R, std::vector<unsigned char> &ArgCodes,
   EncodeFixedValueType(VT, Sig);
 }
 
+static void UpdateArgCodes(Record *R, std::vector<unsigned char> &ArgCodes) {
+  MVT::SimpleValueType VT = getValueType(R->getValueAsDef("VT"));
+  if (R->isSubClassOf("LLVMMatchType"))
+    return;
+
+  unsigned Tmp = 0;
+  switch (VT) {
+  default: break;
+  case MVT::iPTRAny: ++Tmp; // FALL THROUGH.
+  case MVT::vAny: ++Tmp; // FALL THROUGH.
+  case MVT::fAny: ++Tmp; // FALL THROUGH.
+  case MVT::iAny: ++Tmp; // FALL THROUGH.
+  case MVT::Any:
+    ArgCodes.push_back(Tmp);
+    break;
+  }
+}
+
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma optimize("",on)
 #endif
@@ -334,7 +370,17 @@ static void EncodeFixedType(Record *R, std::vector<unsigned char> &ArgCodes,
 /// intrinsic into 32 bits, return it.  If not, return ~0U.
 static void ComputeFixedEncoding(const CodeGenIntrinsic &Int,
                                  std::vector<unsigned char> &TypeSig) {
+  unsigned NextArgCode = 0;
   std::vector<unsigned char> ArgCodes;
+
+  // Add codes for any overloaded result VTs.
+  if (Int.IS.RetVTs.size() > 0)
+    for (unsigned i = 0, e = Int.IS.RetVTs.size(); i != e; ++i)
+      UpdateArgCodes(Int.IS.RetTypeDefs[i], ArgCodes);
+
+  // Add codes for any overloaded operand VTs.
+  for (unsigned i = 0, e = Int.IS.ParamTypeDefs.size(); i != e; ++i)
+    UpdateArgCodes(Int.IS.ParamTypeDefs[i], ArgCodes);
 
   if (Int.IS.RetVTs.empty())
     TypeSig.push_back(IIT_Done);
@@ -352,11 +398,11 @@ static void ComputeFixedEncoding(const CodeGenIntrinsic &Int,
     }
 
     for (unsigned i = 0, e = Int.IS.RetVTs.size(); i != e; ++i)
-      EncodeFixedType(Int.IS.RetTypeDefs[i], ArgCodes, TypeSig);
+      EncodeFixedType(Int.IS.RetTypeDefs[i], ArgCodes, NextArgCode, TypeSig);
   }
 
   for (unsigned i = 0, e = Int.IS.ParamTypeDefs.size(); i != e; ++i)
-    EncodeFixedType(Int.IS.ParamTypeDefs[i], ArgCodes, TypeSig);
+    EncodeFixedType(Int.IS.ParamTypeDefs[i], ArgCodes, NextArgCode, TypeSig);
 }
 
 static void printIITEntry(raw_ostream &OS, unsigned char X) {

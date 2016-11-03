@@ -20,6 +20,7 @@
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Target/TargetLowering.h"
 
 namespace llvm {
@@ -67,6 +68,10 @@ enum NodeType : unsigned {
   // Floating point comparison
   FCMP,
 
+  // Floating point converts to sparse destinations.
+  FP_TO_SINT_INREG,
+  FP_TO_UINT_INREG,
+
   // Scalar extract
   EXTR,
 
@@ -104,6 +109,7 @@ enum NodeType : unsigned {
   UZP2,
   TRN1,
   TRN2,
+  REV,
   REV16,
   REV32,
   REV64,
@@ -191,6 +197,57 @@ enum NodeType : unsigned {
   FRECPE,
   FRSQRTE,
 
+  SUNPKHI,
+  SUNPKLO,
+  UUNPKHI,
+  UUNPKLO,
+
+  TBL,
+
+  // SVE specific operations.
+  ANDV_PRED,
+  BRKA,
+  CLASTA_N,
+  CLASTB_N,
+  DUP_PRED,
+  EORV_PRED,
+  FADDA_PRED,
+  FADDV_PRED,
+  FCVT,
+  FMAXV_PRED,
+  FMAXNMV_PRED,
+  FMINV_PRED,
+  FMINNMV_PRED,
+  INSR,
+  LASTA,
+  LASTB,
+  LDFF1B,
+  LDFF1H,
+  LDFF1W,
+  LDFF1D,
+  LDNT1,
+  ORV_PRED,
+  PTEST,
+  PTRUE,
+
+  RDFFR,
+  RDFFR_PRED,
+  SETFFR,
+  WRFFR,
+
+  REINTERPRET_CAST,
+  SADDV_PRED,
+  SMAXV_PRED,
+  SMINV_PRED,
+  STNT1,
+  UADDV_PRED,
+  UMAXV_PRED,
+  UMINV_PRED,
+  FMIN_PRED,
+  FMINNM_PRED,
+  FMAX_PRED,
+  FMAXNM_PRED,
+
   // NEON Load/Store with post-increment base updates
   LD2post = ISD::FIRST_TARGET_MEMORY_OPCODE,
   LD3post,
@@ -246,6 +303,8 @@ public:
 
   /// Provide custom lowering hooks for some operations.
   SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
+  void LowerOperationWrapper(SDNode *N, SmallVectorImpl<SDValue> &Results,
+                             SelectionDAG &DAG) const override;
 
   const char *getTargetNodeName(unsigned Opcode) const override;
 
@@ -299,7 +358,7 @@ public:
                      unsigned &RequiredAligment) const override;
   bool hasPairedLoad(EVT LoadedType, unsigned &RequiredAligment) const override;
 
-  unsigned getMaxSupportedInterleaveFactor() const override { return 4; }
+  unsigned getMaxSupportedInterleaveFactor() const override { return 6; }
 
   bool lowerInterleavedLoad(LoadInst *LI,
                             ArrayRef<ShuffleVectorInst *> Shuffles,
@@ -307,6 +366,15 @@ public:
                             unsigned Factor) const override;
   bool lowerInterleavedStore(StoreInst *SI, ShuffleVectorInst *SVI,
                              unsigned Factor) const override;
+  bool lowerGathersToInterleavedLoad(ArrayRef<Value *> Gathers,
+                                     IntrinsicInst *ReplaceNode,
+                                     unsigned Factor,
+                                     TargetTransformInfo *TTI) const override;
+  bool lowerScattersToInterleavedStore(ArrayRef<Value *> ValuesToStore,
+                                       Value *FirstScatterAddress,
+                                       IntrinsicInst *ReplaceNode,
+                                       unsigned Factor,
+                                       TargetTransformInfo *TTI) const override;
 
   bool isLegalAddImmediate(int64_t) const override;
   bool isLegalICmpImmediate(int64_t) const override;
@@ -498,8 +566,16 @@ private:
   SDValue LowerEXTRACT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSCALAR_TO_VECTOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerBUILD_VECTOR(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerCONCAT_VECTOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVECTOR_SHUFFLE(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerVECTOR_SHUFFLE_VAR(SDValue Op, SelectionDAG &DAG,
+                                  unsigned Factor, EVT NewVT) const;
+  SDValue LowerSERIES_VECTOR(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSPLAT_VECTOR(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerTEST_VECTOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerEXTRACT_SUBVECTOR(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerINSERT_SUBVECTOR(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerELEMENT_COUNT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVectorSRA_SRL_SHL(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerShiftLeftParts(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerShiftRightParts(SDValue Op, SelectionDAG &DAG) const;
@@ -518,6 +594,9 @@ private:
   SDValue LowerVectorOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerCONCAT_VECTORS(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFSINCOS(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerINTRINSIC_W_CHAIN(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerTRUNCATE(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerLASTX(SDValue Op, SelectionDAG &DAG) const;
 
   SDValue BuildSDIVPow2(SDNode *N, const APInt &Divisor, SelectionDAG &DAG,
                         std::vector<SDNode *> *Created) const override;
@@ -557,6 +636,7 @@ private:
     return TargetLowering::getInlineAsmMemConstraint(ConstraintCode);
   }
 
+  bool isVectorLoadExtDesirable(SDValue ExtVal) const override;
   bool isUsedByReturnOnly(SDNode *N, SDValue &Chain) const override;
   bool mayBeEmittedAsTailCall(CallInst *CI) const override;
   bool getIndexedAddressParts(SDNode *Op, SDValue &Base, SDValue &Offset,
@@ -569,6 +649,29 @@ private:
                                   SDValue &Offset, ISD::MemIndexedMode &AM,
                                   SelectionDAG &DAG) const override;
 
+  void ReplaceExtensionResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
+                               SelectionDAG &DAG, unsigned HiOpcode,
+                               unsigned LoOpcode) const;
+  void ReplaceExtractSubVectorResults(SDNode *N,
+                                      SmallVectorImpl<SDValue> &Results,
+                                      SelectionDAG &DAG) const;
+  void ReplaceInsertSubVectorResults(SDNode *N,
+                                     SmallVectorImpl<SDValue> &Results,
+                                     SelectionDAG &DAG) const;
+  void ReplaceInsertVectorElementResults(SDNode *N,
+                                         SmallVectorImpl<SDValue> &Results,
+                                         SelectionDAG &DAG) const;
+  void ReplaceFP_EXTENDResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
+                               SelectionDAG &DAG) const;
+  void ReplaceMaskedSpecLoadResults(SDNode *, SmallVectorImpl<SDValue> &,
+                                    SelectionDAG &) const;
+  void ReplaceVectorShuffleVarResults(SDNode *, SmallVectorImpl<SDValue> &,
+                                      SelectionDAG &) const;
+  void ReplaceSplatVectorResults(SDNode *, SmallVectorImpl<SDValue> &,
+                                 SelectionDAG &) const;
+
+  void ReplaceMergeVecCpyResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
+                                 SelectionDAG &DAG) const;
   void ReplaceNodeResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
                           SelectionDAG &DAG) const override;
 

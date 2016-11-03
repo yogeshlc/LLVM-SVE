@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
@@ -316,6 +317,7 @@ const char *Instruction::getOpcodeName(unsigned OpCode) {
   // Other instructions...
   case ICmp:           return "icmp";
   case FCmp:           return "fcmp";
+  case Test:           return "test";
   case PHI:            return "phi";
   case Select:         return "select";
   case Call:           return "call";
@@ -330,6 +332,9 @@ const char *Instruction::getOpcodeName(unsigned OpCode) {
   case InsertValue:    return "insertvalue";
   case LandingPad:     return "landingpad";
   case CleanupPad:     return "cleanuppad";
+  case ElementCount:   return "elementcount";
+  case SeriesVector:   return "seriesvector";
+  case PropFF:         return "propff";
 
   default: return "<Invalid operator> ";
   }
@@ -490,7 +495,8 @@ bool Instruction::mayReadFromMemory() const {
   case Instruction::CatchRet:
     return true;
   case Instruction::Call:
-    return !cast<CallInst>(this)->doesNotAccessMemory();
+    return (!cast<CallInst>(this)->doesNotAccessMemory()
+            && !isa<MemSetInst>(this));
   case Instruction::Invoke:
     return !cast<InvokeInst>(this)->doesNotAccessMemory();
   case Instruction::Store:

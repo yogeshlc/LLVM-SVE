@@ -1,8 +1,8 @@
 ; RUN: opt < %s -instcombine -S | FileCheck %s
 
 define void @f(i64 %val, i32  %limit, i32 *%ptr) {
-;CHECK: %0 = trunc i64
-;CHECK: %1 = phi i32
+;CHECK: %[[VAR:.*]] = trunc i64 %val to i32
+;CHECK: phi i32 [ %[[VAR]], %entry ]
 entry:
   %tempvector = insertelement <16 x i64> undef, i64 %val, i32 0
   %vector = shufflevector <16 x i64> %tempvector, <16 x i64> undef, <16 x i32> zeroinitializer

@@ -2360,10 +2360,22 @@ bool LLParser::ParseStructBody(SmallVectorImpl<Type*> &Body) {
 ///   Type
 ///     ::= '[' APSINTVAL 'x' Types ']'
 ///     ::= '<' APSINTVAL 'x' Types '>'
+///     ::= '<' 'n' 'x' APSINTVAL 'x' Types '>'
 bool LLParser::ParseArrayVectorType(Type *&Result, bool isVector) {
+  bool Scalable = false; /* assume fixed length vectors */
+
+  if (isVector && Lex.getKind() == lltok::kw_n) {
+    Lex.Lex(); // consume the 'n'
+
+    if (ParseToken(lltok::kw_x, "expected 'x' after scalable vector specifier"))
+      return true;
+
+    Scalable = true; /* scalable vector */
+  }
+
   if (Lex.getKind() != lltok::APSInt || Lex.getAPSIntVal().isSigned() ||
       Lex.getAPSIntVal().getBitWidth() > 64)
-    return TokError("expected number in address space");
+    return TokError("expected scalable vector or number in address space");
 
   LocTy SizeLoc = Lex.getLoc();
   uint64_t Size = Lex.getAPSIntVal().getZExtValue();
@@ -2387,7 +2399,7 @@ bool LLParser::ParseArrayVectorType(Type *&Result, bool isVector) {
       return Error(SizeLoc, "size too large for vector");
     if (!VectorType::isValidElementType(EltTy))
       return Error(TypeLoc, "invalid vector element type");
-    Result = VectorType::get(EltTy, unsigned(Size));
+    Result = VectorType::get(EltTy, unsigned(Size), Scalable);
   } else {
     if (!ArrayType::isValidElementType(EltTy))
       return Error(TypeLoc, "invalid array element type");
@@ -3097,6 +3109,8 @@ bool LLParser::ParseValID(ValID &ID, PerFunctionState *PFS) {
 
   case lltok::kw_getelementptr:
   case lltok::kw_shufflevector:
+  case lltok::kw_elementcount:
+  case lltok::kw_seriesvector:
   case lltok::kw_insertelement:
   case lltok::kw_extractelement:
   case lltok::kw_select: {
@@ -3174,6 +3188,27 @@ bool LLParser::ParseValID(ValID &ID, PerFunctionState *PFS) {
         return Error(ID.Loc, "invalid operands to shufflevector");
       ID.ConstantVal =
                  ConstantExpr::getShuffleVector(Elts[0], Elts[1],Elts[2]);
+    } else if (Opc == Instruction::ElementCount) {
+      if (Elts.size() != 1)
+        return Error(ID.Loc, "elementcount expects a single operand");
+
+      // we cannot create this constant until we know its type
+      ID.Kind = ValID::t_ElementCount;
+      ID.ConstantVal = Elts[0];
+      return false;
+    } else if (Opc == Instruction::SeriesVector) {
+      if (Elts.size() != 2)
+        return Error(ID.Loc, "seriesvector requires two operands");
+      if (!SeriesVectorInst::isValidOperands(Elts[0], Elts[1]))
+        return Error(ID.Loc, "invalid operands to seriesvector");
+
+      // we cannot create this constant until we know its type
+      ID.ConstantStructElts = make_unique<Constant *[]>(Elts.size());
+      ID.UIntVal = Elts.size();
+      memcpy(ID.ConstantStructElts.get(), Elts.data(),
+             Elts.size() * sizeof(Elts[0]));
+      ID.Kind = ValID::t_SeriesVector;
+      return false;
     } else if (Opc == Instruction::ExtractElement) {
       if (Elts.size() != 2)
         return Error(ID.Loc, "expected two operands to extractelement");
@@ -4425,6 +4460,21 @@ bool LLParser::ConvertValIDToValue(Type *Ty, ValID &ID, Value *&V,
     } else
       return Error(ID.Loc, "constant expression type mismatch");
     return false;
+  case ValID::t_ElementCount:
+    if (Ty->isIntegerTy())
+      V = ConstantExpr::getElementCount(Ty, ID.ConstantVal);
+    else
+      return Error(ID.Loc, "constant expression type mismatch");
+    return false;
+  case ValID::t_SeriesVector:
+    if (auto *VTy = dyn_cast<VectorType>(Ty))
+      if (VTy->getElementType() == ID.ConstantStructElts[0]->getType()) {
+        V = ConstantExpr::getSeriesVector(VTy->getElementCount(),
+                                          ID.ConstantStructElts[0],
+                                          ID.ConstantStructElts[1]);
+        return false;
+      }
+    return Error(ID.Loc, "constant expression type mismatch");
   }
   llvm_unreachable("Invalid ValID");
 }
@@ -4942,6 +4992,7 @@ int LLParser::ParseInstruction(Instruction *&Inst, BasicBlock *BB,
       Inst->setFastMathFlags(FMF);
     return 0;
   }
+  case lltok::kw_test:   return ParseTest(Inst, PFS);
 
   // Casts.
   case lltok::kw_trunc:
@@ -4963,6 +5014,9 @@ int LLParser::ParseInstruction(Instruction *&Inst, BasicBlock *BB,
   case lltok::kw_extractelement: return ParseExtractElement(Inst, PFS);
   case lltok::kw_insertelement:  return ParseInsertElement(Inst, PFS);
   case lltok::kw_shufflevector:  return ParseShuffleVector(Inst, PFS);
+  case lltok::kw_elementcount:   return ParseElementCount(Inst, PFS);
+  case lltok::kw_seriesvector:   return ParseSeriesVector(Inst, PFS);
+  case lltok::kw_propff:         return ParsePropFF(Inst, PFS);
   case lltok::kw_phi:            return ParsePHI(Inst, PFS);
   case lltok::kw_landingpad:     return ParseLandingPad(Inst, PFS);
   // Call.
@@ -5021,6 +5075,38 @@ bool LLParser::ParseCmpPredicate(unsigned &P, unsigned Opc) {
     }
   }
   Lex.Lex();
+  return false;
+}
+
+/// ParseTestPredicate - Parse a boolean predicate
+bool LLParser::ParseTestPredicate(TestInst::Predicate &P) {
+  unsigned Range, Value;
+
+  switch (Lex.getKind()) {
+    default: return TokError("expected test range "
+                             "('all', 'any', 'first' or 'last')");
+    case lltok::kw_all:   Range = 0; break;
+    case lltok::kw_any:   Range = 1; break;
+    case lltok::kw_first: Range = 2; break;
+    case lltok::kw_last:  Range = 3; break;
+  }
+  Lex.Lex();
+
+  switch (Lex.getKind()) {
+    default: return TokError("expected test value ('true' or 'false')");
+    case lltok::kw_false: Value = 0; break;
+    case lltok::kw_true:  Value = 1; break;
+  }
+  Lex.Lex();
+
+  static TestInst::Predicate predicates[4][2] = {
+    { TestInst::ALL_FALSE,   TestInst::ALL_TRUE },
+    { TestInst::ANY_FALSE,   TestInst::ANY_TRUE },
+    { TestInst::FIRST_FALSE, TestInst::FIRST_TRUE },
+    { TestInst::LAST_FALSE,  TestInst::LAST_TRUE }
+  };
+
+  P = predicates[Range][Value];
   return false;
 }
 
@@ -5552,6 +5638,24 @@ bool LLParser::ParseCompare(Instruction *&Inst, PerFunctionState &PFS,
   return false;
 }
 
+/// ParseTest
+///  ::= 'test' TPredicates TypeAndValue
+bool LLParser::ParseTest(Instruction *&Inst, PerFunctionState &PFS) {
+  LocTy Loc;
+  TestInst::Predicate Pred;
+  Value *Op;
+
+  if (ParseTestPredicate(Pred) ||
+      ParseTypeAndValue(Op, Loc, PFS))
+    return true;
+
+  if (!TestInst::isValidOperands(Op))
+    return Error(Loc, "test requires boolean or vector boolean operand");
+
+  Inst = new TestInst(Pred, Op);
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // Other Instructions.
 //===----------------------------------------------------------------------===//
@@ -5668,6 +5772,83 @@ bool LLParser::ParseShuffleVector(Instruction *&Inst, PerFunctionState &PFS) {
     return Error(Loc, "invalid shufflevector operands");
 
   Inst = new ShuffleVectorInst(Op0, Op1, Op2);
+  return false;
+}
+
+/// ParseElementCount
+///   ::= 'elementcount' TypeAndValue 'as' Type
+bool LLParser::ParseElementCount(Instruction *&Inst, PerFunctionState &PFS) {
+  Type *Ty = nullptr; LocTy TypeLoc;
+  Value *Op0 = nullptr; LocTy Op0Loc;
+
+  if (ParseTypeAndValue(Op0, Op0Loc, PFS) ||
+      ParseToken(lltok::kw_as, "expected 'as' after value") ||
+      ParseType(Ty, TypeLoc))
+    return true;
+
+  if (!Ty->isIntegerTy())
+    return Error(TypeLoc, "elementcount expects to return an integer type");
+
+  Inst = new ElementCountInst(Ty, Op0);
+  return false;
+}
+
+/// ParseSeriesVector
+///   ::= 'seriesvector' [nsw|nuw] TypeAndValue ',' Value 'as' Type
+bool LLParser::ParseSeriesVector(Instruction *&Inst, PerFunctionState &PFS) {
+  Type *Ty = nullptr; LocTy TypeLoc;
+  Value *Op0 = nullptr; LocTy Op0Loc;
+  Value *Op1 = nullptr; LocTy Op1Loc;
+  bool NSW = false;
+  bool NUW = false;
+  if (EatIfPresent(lltok::kw_nuw))
+    NUW = true;
+  if (EatIfPresent(lltok::kw_nsw)) {
+    NSW = true;
+    if (EatIfPresent(lltok::kw_nuw))
+      NUW = true;
+  }
+
+  if (ParseTypeAndValue(Op0, Op0Loc, PFS) ||
+      ParseToken(lltok::comma, "expected ',' after base value") ||
+      ParseValue(Op0->getType(), Op1, PFS) ||
+      ParseToken(lltok::kw_as, "expected 'as' after value") ||
+      ParseType(Ty, TypeLoc))
+    return true;
+
+  if (!Ty->isVectorTy())
+    return Error(TypeLoc, "seriesvector expects to return a vector type");
+
+  auto *VTy = cast<VectorType>(Ty);
+  if (VTy->getElementType() != Op0->getType())
+    return Error(TypeLoc, "result vector not compatible with first operand");
+
+  Inst = new SeriesVectorInst(Op0, Op1, VTy->getElementCount());
+  cast<SeriesVectorInst>(Inst)->setHasNoSignedWrap(NSW);
+  cast<SeriesVectorInst>(Inst)->setHasNoUnsignedWrap(NUW);
+  return false;
+}
+
+/// ParsePropFF
+///   ::= 'propff' TypeAndValue ',' Value
+bool LLParser::ParsePropFF(Instruction *&Inst, PerFunctionState &PFS) {
+  LocTy Loc;
+  Value *Op1 = nullptr;
+  Value *Op2 = nullptr;
+
+  if (ParseTypeAndValue(Op1, Loc, PFS))
+    return true;
+
+  if (ParseToken(lltok::comma, "expected ',' after vector type"))
+    return true;
+
+  if (ParseValue(Op1->getType(), Op2, PFS))
+    return true;
+
+  if (!PropFFInst::isValidOperands(Op1, Op2))
+    return Error(Loc, "invalid operand types for propff");
+
+  Inst = new PropFFInst(Op1, Op2);
   return false;
 }
 

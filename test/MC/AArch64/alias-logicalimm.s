@@ -1,4 +1,5 @@
 // RUN: llvm-mc -triple=aarch64-none-linux-gnu < %s | FileCheck %s
+// RUN: llvm-mc -triple=aarch64-none-linux-gnu -mattr=+sve < %s | FileCheck %s
 
 // CHECK: and x0, x1, #0xfffffffffffffffd
 // CHECK: and x0, x1, #0xfffffffffffffffd

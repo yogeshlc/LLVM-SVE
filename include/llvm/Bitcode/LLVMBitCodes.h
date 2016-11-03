@@ -166,7 +166,10 @@ enum TypeCodes {
 
   TYPE_CODE_FUNCTION = 21, // FUNCTION: [vararg, retty, paramty x N]
 
-  TYPE_CODE_TOKEN = 22 // TOKEN
+  TYPE_CODE_TOKEN = 22, // TOKEN
+
+  TYPE_CODE_SVE_VEC = 23, // SVE hack
+  TYPE_CODE_SVE_PRED = 24
 };
 
 enum OperandBundleTagCode {
@@ -288,8 +291,10 @@ enum ConstantsCodes {
   CST_CODE_CE_INBOUNDS_GEP = 20, // INBOUNDS_GEP:  [n x operands]
   CST_CODE_BLOCKADDRESS = 21,    // CST_CODE_BLOCKADDRESS [fnty, fnval, bb#]
   CST_CODE_DATA = 22,            // DATA:          [n x elements]
-  CST_CODE_INLINEASM = 23        // INLINEASM:     [sideeffect|alignstack|
+  CST_CODE_INLINEASM = 23,       // INLINEASM:     [sideeffect|alignstack|
                                  //                 asmdialect,asmstr,conststr]
+  CST_CODE_CE_SERIESVEC = 24,    // CE_SERIESVEC:  [opty, opval, opty, opval]
+  CST_CODE_CE_ELTCOUNT = 25      // CE_ELTCOUNT:   [opty, opval]
 };
 
 /// CastOpcodes - These are values used in the bitcode files to encode which
@@ -464,6 +469,11 @@ enum FunctionCodes {
   // 53 is unused.
   // 54 is unused.
   FUNC_CODE_OPERAND_BUNDLE = 55, // OPERAND_BUNDLE: [tag#, value...]
+  // Healthy gap in case community adds new instructions
+  FUNC_CODE_INST_SERIESVEC = 100, // SERIESVEC: [ty, opval, opty, opval, opty]
+  FUNC_CODE_INST_ELTCOUNT  = 101, // ELTCOUNT:  [ty, opval, opty]
+  FUNC_CODE_INST_TEST      = 102, // TEST:      [pred, opty, opval]
+  FUNC_CODE_INST_PROPFF    = 103  // PROPFF:    [opval, opty, opval]
 };
 
 enum UseListCodes {

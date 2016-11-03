@@ -1,17 +1,54 @@
-Low Level Virtual Machine (LLVM)
-================================
+SVE Enhancements to LLVM
+========================
 
-This directory and its subdirectories contain source code for LLVM,
-a toolkit for the construction of highly optimized compilers,
-optimizers, and runtime environments.
+This repository is a clone of the public LLVM repository (http://llvm.org), plus
+a single patch which provides support for the ARMv8-A Scalable Vector Extension
+(SVE).
 
-LLVM is open source software. You may freely distribute it under the terms of
-the license agreement found in LICENSE.txt.
+ARM is providing this repository to aid discussions about:
+* Adding support for SVE to LLVM for SVE
+* IR changes to support vectorizing loops in a scalable manner
 
-Please see the documentation provided in docs/ for further
-assistance with LLVM, and in particular docs/GettingStarted.rst for getting
-started with LLVM and docs/README.txt for an overview of LLVM's
-documentation setup.
+This patch is for information purposes only. It is not intended for inclusion
+into upstream LLVM. Any proposed changes to LLVM resulting from discussion
+provoked by this patch will be implemented by individual patches created and
+reviewed separately.
 
-If you are writing a package for LLVM, see docs/Packaging.rst for our
-suggestions.
+ARM provides no assurances regarding maintenance or support for this repository.
+Pull requests will not be accepted.  ARM intends to remove it once the SVE and
+vectorization discussion is complete.
+
+This patch includes (but is not limited to):
+* Support for scalable vector types in the IR and SelectionDAG
+* New IR instructions and corresponding ISD opcodes:
+  * elementcount
+  * seriesvector
+  * test
+  * propff
+* Changes to the LoopVectorize pass to use these new IR instructions to
+  vectorize loops in a vector-length-agnostic manner with loop control flow
+  based on predication
+* Changes in multiple passes to support the new instructions and scalable types
+* Changes in multiple passes to increase opportunities for vectorization
+* Experimental search loop vectorization pass
+* New AArch64 target passes to recognize common patterns and replace with
+  intrinsics
+* Tablegen modifications to support the new MVTs and provide better operand
+  matching
+* Instruction/register info td files and lowering code for SVE
+* A provisional implementation of an SVE procedure call standard, may be changed
+  in future
+
+Contributors:
+Amara Emerson
+Assad Hashmi
+David Sherwood
+Florian Hahn
+Francesco Petrogalli
+Graham Hunter
+Kiran Chandramohan
+Maciej Gabka
+Paul Walker
+Richard Sandiford
+Sander De Smalen
+Will Lovett

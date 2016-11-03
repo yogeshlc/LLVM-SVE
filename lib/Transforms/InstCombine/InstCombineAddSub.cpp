@@ -1300,6 +1300,29 @@ Instruction *InstCombiner::visitAdd(BinaryOperator &I) {
     }
   }
 
+  {
+    // seriesvector(A, B) + splat(C) ==> seriesvector(A+C, B)
+    Value *SplatVal, *Start, *Step;
+
+    if (match(LHS, m_SeriesVector(m_Value(Start), m_Value(Step))) &&
+        match(RHS, m_SplatVector(m_Value(SplatVal)))) {
+      Value *NewStart = Builder->CreateAdd(Start, SplatVal);
+      if (auto *BO = dyn_cast<BinaryOperator>(NewStart))
+        BO->copyIRFlags(&I);
+
+      return new SeriesVectorInst(I.getType(), NewStart, Step);
+    }
+
+    if (match(RHS, m_SeriesVector(m_Value(Start), m_Value(Step))) &&
+        match(LHS, m_SplatVector(m_Value(SplatVal)))) {
+      Value *NewStart = Builder->CreateAdd(Start, SplatVal);
+      if (auto *BO = dyn_cast<BinaryOperator>(NewStart))
+        BO->copyIRFlags(&I);
+
+      return new SeriesVectorInst(I.getType(), NewStart, Step);
+    }
+  }
+
   // TODO(jingyue): Consider WillNotOverflowSignedAdd and
   // WillNotOverflowUnsignedAdd to reduce the number of invocations of
   // computeKnownBits.
@@ -1679,6 +1702,20 @@ Instruction *InstCombiner::visitSub(BinaryOperator &I) {
       match(Op1, m_Trunc(m_PtrToInt(m_Value(RHSOp)))))
     if (Value *Res = OptimizePointerDifference(LHSOp, RHSOp, I.getType()))
       return replaceInstUsesWith(I, Res);
+
+  {
+    Value *SplatVal, *Start, *Step;
+
+    // seriesvector(A, B) - splat(C) ==> seriesvector(A-C, B)
+    if (match(Op0, m_SeriesVector(m_Value(Start), m_Value(Step))) &&
+        match(Op1, m_SplatVector(m_Value(SplatVal)))) {
+      Value *NewStart = Builder->CreateSub(Start, SplatVal);
+      if (auto *BO = dyn_cast<BinaryOperator>(NewStart))
+        BO->copyIRFlags(&I);
+
+      return new SeriesVectorInst(I.getType(), NewStart, Step);
+    }
+  }
 
   bool Changed = false;
   if (!I.hasNoSignedWrap() && WillNotOverflowSignedSub(Op0, Op1, I)) {

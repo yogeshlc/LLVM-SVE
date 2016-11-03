@@ -14,7 +14,7 @@ target datalayout = "e-m:e-p:32:32-i1:32-i64:64-a:0-n32"
 ; CHECK: Inst:  %0 = load i8, i8* %arrayidx, align 1
 ; CHECK: Base offset: %dst
 ; CHECK: ArrayDecl[UnknownSize][%stride] with elements of 1 bytes.
-; CHECK: ArrayRef[{(1 + %bs),+,-1}<nw><%for.cond1.preheader>][{-1,+,1}<nw><%for.body3>]
+; CHECK: ArrayRef[{(1 + %bs)<nsw>,+,-1}<nw><%for.cond1.preheader>][{-1,+,1}<nw><%for.body3>]
 
 ; AddRec: {{(%stride * %bs),+,(-1 * %stride)}<%for.cond1.preheader>,+,1}<nw><%for.body3>
 ; CHECK: Inst:  store i8 %0, i8* %arrayidx7, align 1

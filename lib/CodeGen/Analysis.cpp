@@ -213,6 +213,24 @@ ISD::CondCode llvm::getICmpCondCode(ICmpInst::Predicate Pred) {
   }
 }
 
+/// getTestCondCode - Return the ISD condition code corresponding to
+/// the given LLVM IR boolean vector test predicate.
+///
+ISD::TestCode llvm::getTestCondCode(TestInst::Predicate Pred) {
+  switch (Pred) {
+  case TestInst::ALL_FALSE:   return ISD::TEST_ALL_FALSE;
+  case TestInst::ALL_TRUE:    return ISD::TEST_ALL_TRUE;
+  case TestInst::ANY_FALSE:   return ISD::TEST_ANY_FALSE;
+  case TestInst::ANY_TRUE:    return ISD::TEST_ANY_TRUE;
+  case TestInst::FIRST_FALSE: return ISD::TEST_FIRST_FALSE;
+  case TestInst::FIRST_TRUE:  return ISD::TEST_FIRST_TRUE;
+  case TestInst::LAST_FALSE:  return ISD::TEST_LAST_FALSE;
+  case TestInst::LAST_TRUE:   return ISD::TEST_LAST_TRUE;
+  default:
+    llvm_unreachable("Invalid Test predicate opcode!");
+  }
+}
+
 static bool isNoopBitcast(Type *T1, Type *T2,
                           const TargetLoweringBase& TLI) {
   return T1 == T2 || (T1->isPointerTy() && T2->isPointerTy()) ||

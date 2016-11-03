@@ -799,8 +799,8 @@ void AsmWriterEmitter::EmitPrintAliasInstruction(raw_ostream &O) {
       IAPrinter IAP(CGA.Result->getAsString(), CGA.AsmString);
 
       unsigned NumMIOps = 0;
-      for (auto &Operand : CGA.ResultOperands)
-        NumMIOps += Operand.getMINumOperands();
+      for (unsigned i = 0, e = CGA.ResultInst->Operands.size(); i != e; ++i)
+        NumMIOps += CGA.ResultInst->Operands[i].MINumOperands;
 
       std::string Cond;
       Cond = std::string("MI->getNumOperands() == ") + llvm::utostr(NumMIOps);
@@ -810,6 +810,19 @@ void AsmWriterEmitter::EmitPrintAliasInstruction(raw_ostream &O) {
 
       unsigned MIOpNum = 0;
       for (unsigned i = 0, e = LastOpNo; i != e; ++i) {
+        // Skip over tied operands as they're not part of an alias declaration.
+        unsigned OpNum =
+            CGA.ResultInst->Operands.getSubOperandNumber(MIOpNum).first;
+        if (CGA.ResultInst->Operands[OpNum].MINumOperands == 1 &&
+            CGA.ResultInst->Operands[OpNum].getTiedRegister() != -1) {
+          // Tied operands of different RegisterClass should be explicit within
+          // an instruction's syntax and so cannot be skipped.
+          int TiedOpNum = CGA.ResultInst->Operands[OpNum].getTiedRegister();
+          if (CGA.ResultInst->Operands[OpNum].Rec->getName() ==
+              CGA.ResultInst->Operands[TiedOpNum].Rec->getName())
+            ++MIOpNum;
+        }
+
         std::string Op = "MI->getOperand(" + llvm::utostr(MIOpNum) + ")";
 
         const CodeGenInstAlias::ResultOperand &RO = CGA.ResultOperands[i];
@@ -979,6 +992,11 @@ void AsmWriterEmitter::EmitPrintAliasInstruction(raw_ostream &O) {
   O << "         AsmString[I] != '\\0')\n";
   O << "    ++I;\n";
   O << "  OS << '\\t' << StringRef(AsmString, I);\n";
+
+  // Skip whatever seperator the alias uses between its opcode and first operand
+  // in preference to the tab we are about to insert.
+  O << "  if (AsmString[I] == ' ' || AsmString[I] == '\t')\n";
+  O << "    ++I;\n";
 
   O << "  if (AsmString[I] != '\\0') {\n";
   O << "    OS << '\\t';\n";

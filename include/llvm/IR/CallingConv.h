@@ -193,6 +193,10 @@ namespace CallingConv {
     /// Calling convention for AMDGPU code object kernels.
     AMDGPU_KERNEL = 91,
 
+    // Note: the SVE PCS is provisional, and should not be relied upon.
+    /// Calling convention between AArch64 SVE functions
+    AArch64_SVE_VectorCall = 92,
+
     /// The highest possible calling convention ID. Must be some 2^k - 1.
     MaxID = 1023
   };

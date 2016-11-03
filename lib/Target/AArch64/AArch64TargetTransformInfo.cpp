@@ -251,7 +251,6 @@ int AArch64TTIImpl::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src) {
     { ISD::UINT_TO_FP, MVT::v2f64, MVT::v2i16, 4 },
     { ISD::UINT_TO_FP, MVT::v2f64, MVT::v2i32, 2 },
 
-
     // LowerVectorFP_TO_INT
     { ISD::FP_TO_SINT, MVT::v2i32, MVT::v2f32, 1 },
     { ISD::FP_TO_SINT, MVT::v4i32, MVT::v4f32, 1 },
@@ -287,6 +286,72 @@ int AArch64TTIImpl::getCastInstrCost(unsigned Opcode, Type *Dst, Type *Src) {
                                                  DstTy.getSimpleVT(),
                                                  SrcTy.getSimpleVT()))
     return Entry->Cost;
+
+  static const TypeConversionCostTblEntry SVEConversionTbl[] = {
+    // Truncating two illegal vectors into one legal vector,
+    // can be done with one instruction on SVE e.g.
+    // UZP1([ .....v7 | .....v6 | .....v5 | .....v4 ],
+    //      [ .....v3 | .....v2 | .....v1 | .....v0 ])
+    //    = [ v7 | v6 | v5 | v4 | v3 | v2 | v1 | v0 ]
+    // If type is smaller than half the size, ANDI
+    // can be used to fill zeros in high bits.
+    { ISD::TRUNCATE,    MVT::nxv8i32,  MVT::nxv8i64, 2 * 1 },
+    { ISD::TRUNCATE,    MVT::nxv4i32,  MVT::nxv4i64,     1 },
+    { ISD::TRUNCATE,    MVT::nxv4i16,  MVT::nxv4i64,     2 },
+    { ISD::TRUNCATE,    MVT::nxv8i16,  MVT::nxv8i32,     1 },
+    { ISD::TRUNCATE,    MVT::nxv8i8,   MVT::nxv8i32,     2 },
+    { ISD::TRUNCATE,    MVT::nxv16i8,  MVT::nxv16i16,    1 },
+    { ISD::TRUNCATE,    MVT::nxv16i8,  MVT::nxv16i32,    3 }, // uzp1(uzp1(A),uzp1(B))
+
+    // Zero extend happens with unpack, possibly with 'AND'
+    // to zero the high bits.
+    { ISD::ZERO_EXTEND, MVT::nxv8i64,  MVT::nxv8i32, 4 },
+    { ISD::ZERO_EXTEND, MVT::nxv4i64,  MVT::nxv4i32, 2 },
+    { ISD::ZERO_EXTEND, MVT::nxv4i64,  MVT::nxv4i16, 4 },
+    { ISD::ZERO_EXTEND, MVT::nxv8i32,  MVT::nxv8i16, 2 },
+    { ISD::ZERO_EXTEND, MVT::nxv8i32,  MVT::nxv8i8,  4 },
+    { ISD::ZERO_EXTEND, MVT::nxv16i16, MVT::nxv16i8, 2 },
+    { ISD::ZERO_EXTEND, MVT::nxv16i32, MVT::nxv16i8, 4 },
+
+    // Zero extending requires zeroing high bits,
+    // can be done with a ANDI instruction that fills
+    // in zeros in high bits. Because it is so cheap,
+    // we override BaseT's implementation.
+    { ISD::ZERO_EXTEND, MVT::nxv2i64,  MVT::nxv2i32, 1 },
+    { ISD::ZERO_EXTEND, MVT::nxv2i64,  MVT::nxv2i16, 1 },
+    { ISD::ZERO_EXTEND, MVT::nxv4i32,  MVT::nxv4i16, 1 },
+    { ISD::ZERO_EXTEND, MVT::nxv2i64,  MVT::nxv2i8,  1 },
+    { ISD::ZERO_EXTEND, MVT::nxv4i32,  MVT::nxv4i8,  1 },
+    { ISD::ZERO_EXTEND, MVT::nxv8i16,  MVT::nxv8i8,  1 },
+
+    // Truncating legal type to smaller type
+    // is free because the vector is unpacked.
+    { ISD::TRUNCATE,    MVT::nxv2i32,  MVT::nxv2i64, 0 },
+    { ISD::TRUNCATE,    MVT::nxv2i16,  MVT::nxv2i64, 0 },
+    { ISD::TRUNCATE,    MVT::nxv2i8,   MVT::nxv2i64, 0 },
+    { ISD::TRUNCATE,    MVT::nxv4i16,  MVT::nxv4i32, 0 },
+    { ISD::TRUNCATE,    MVT::nxv4i8,   MVT::nxv4i32, 0 },
+    { ISD::TRUNCATE,    MVT::nxv8i8,   MVT::nxv8i16, 0 },
+
+    // Floating point extend / truncate
+    { ISD::FP_ROUND,    MVT::nxv2f32,  MVT::nxv2f64, 1 },
+    { ISD::FP_ROUND,    MVT::nxv4f32,  MVT::nxv4f64, 2 },
+    { ISD::FP_EXTEND,   MVT::nxv2f64,  MVT::nxv2f32, 1 },
+    { ISD::FP_EXTEND,   MVT::nxv4f64,  MVT::nxv4f32, 2 },
+
+    { ISD::SINT_TO_FP, MVT::nxv4f32, MVT::nxv4i32, 1 },
+    { ISD::SINT_TO_FP, MVT::nxv2f64, MVT::nxv2i64, 1 },
+    { ISD::SINT_TO_FP, MVT::nxv2f32, MVT::nxv2i32, 1 },
+    { ISD::UINT_TO_FP, MVT::nxv2f32, MVT::nxv2i32, 1 },
+    { ISD::UINT_TO_FP, MVT::nxv4f32, MVT::nxv4i32, 1 },
+    { ISD::UINT_TO_FP, MVT::nxv2f64, MVT::nxv2i64, 1 },
+  };
+
+  if (getST()->hasSVE())
+    if (const auto *Entry = ConvertCostTableLookup(SVEConversionTbl, ISD,
+                                                   DstTy.getSimpleVT(),
+                                                   SrcTy.getSimpleVT()))
+      return Entry->Cost;
 
   return BaseT::getCastInstrCost(Opcode, Dst, Src);
 }
@@ -439,6 +504,12 @@ int AArch64TTIImpl::getCmpSelInstrCost(unsigned Opcode, Type *ValTy,
   // We don't lower some vector selects well that are wider than the register
   // width.
   if (ValTy->isVectorTy() && ISD == ISD::SELECT) {
+    if (ST->hasSVE()) {
+      EVT SelValTy = TLI->getValueType(DL, ValTy);
+      if (SelValTy.isScalableVector()) {
+        return SelValTy.getSizeInBits() / 128;
+      }
+    }
     // We would need this many instructions to hide the scalarization happening.
     const int AmortizationCost = 20;
     static const TypeConversionCostTblEntry
@@ -463,6 +534,62 @@ int AArch64TTIImpl::getCmpSelInstrCost(unsigned Opcode, Type *ValTy,
   return BaseT::getCmpSelInstrCost(Opcode, ValTy, CondTy);
 }
 
+unsigned AArch64TTIImpl::getVectorMemoryOpCost(
+                                        unsigned Opcode, Type *Src, Value *Ptr,
+                                        unsigned Alignment,
+                                        unsigned AddressSpace,
+                                        const MemAccessInfo &Info) {
+  if (!ST->hasSVE())
+    return getMemoryOpCost(Opcode, Src, Alignment, AddressSpace);
+
+  std::pair<unsigned, MVT> LT = TLI->getTypeLegalizationCost(DL, Src);
+
+  if (Info.isUniform() || (Info.isStrided() && std::abs(Info.getStride())==1))
+    return LT.first;
+
+  unsigned NumElems = LT.second.getVectorNumElements();
+
+  // In the general case, strided loads of stride=1,2,3 are 'cheap'
+  // by using the LD(1|2|3) instructions, because they load a full
+  // vector in one operation. Strided stores on the other hand are
+  // expensive.. even though we have ST(2|3) instructions available, it
+  // also needs to store 1|2 different values to fill the gaps between
+  // the stride. Also add cost for the use of more result registers
+  // of LD2 (two result regs) and LD3 (three result regs).
+  if (Info.isStrided()) {
+    switch (std::abs(Info.getStride())) {
+    case 2:
+    case 3:
+      // Assume gather is used for double-word vectors.
+      if (Opcode == Instruction::Load &&
+        Src->getVectorElementType()->getScalarSizeInBits() <= 32)
+        return LT.first + (std::abs(Info.getStride()) - 1);
+    default:
+      break;
+    }
+  }
+
+  unsigned GatherWeight = 2;
+  if (Info.isNonStrided()) {
+    switch (Info.getIndexType()->getScalarSizeInBits()) {
+    case 8:
+    case 16:
+    case 32:
+      // Only handle worst case, because having
+      // index type < 64 bit is same as having
+      // strided not 1,2,3,4.
+      break;
+    default:
+      unsigned NumOps = std::max(1U, NumElems/2);
+      return GatherWeight * LT.first * NumOps;
+    }
+  }
+
+  // With a gather offset < 64bits, we can load/store 4 elements at a time,
+  // so number of operations is NumElems divided by 4.
+  unsigned NumOps = std::max(1U,NumElems/4);
+  return GatherWeight * LT.first * NumOps;
+}
 int AArch64TTIImpl::getMemoryOpCost(unsigned Opcode, Type *Src,
                                     unsigned Alignment, unsigned AddressSpace) {
   std::pair<int, MVT> LT = TLI->getTypeLegalizationCost(DL, Src);
@@ -623,6 +750,155 @@ bool AArch64TTIImpl::getTgtMemIntrinsic(IntrinsicInst *Inst,
     break;
   }
   return true;
+}
+
+bool AArch64TTIImpl::canReduceInVector(const RecurrenceDescriptor &Desc,
+                                       bool NoNaN) {
+  if (!getST()->hasSVE())
+    return false;
+
+  if (Desc.getRecurrenceType()->isFP128Ty())
+    return false;
+
+  RecurrenceDescriptor::RecurrenceKind RecKind = Desc.getRecurrenceKind();
+  switch (RecKind) {
+  default: break;
+  case RecurrenceDescriptor::RK_IntegerAdd:
+  case RecurrenceDescriptor::RK_IntegerAnd:
+  case RecurrenceDescriptor::RK_IntegerOr:
+  case RecurrenceDescriptor::RK_IntegerXor:
+  case RecurrenceDescriptor::RK_FloatAdd: return true;
+  }
+
+  if ((RecKind == RecurrenceDescriptor::RK_FloatMinMax) ||
+      (RecKind == RecurrenceDescriptor::RK_IntegerMinMax)) {
+    switch (Desc.getMinMaxRecurrenceKind()) {
+      default: break;
+      case RecurrenceDescriptor::MRK_SIntMax:
+      case RecurrenceDescriptor::MRK_SIntMin:
+      case RecurrenceDescriptor::MRK_UIntMax:
+      case RecurrenceDescriptor::MRK_UIntMin:
+      case RecurrenceDescriptor::MRK_FloatMin:
+      case RecurrenceDescriptor::MRK_FloatMax: return true;
+    }
+  }
+
+  return false;
+}
+
+Value* AArch64TTIImpl::getReductionIntrinsic(IRBuilder<> &Builder,
+                                             const RecurrenceDescriptor &Desc,
+                                             bool NoNaN, Value *Src) {
+  auto *VTy = dyn_cast<VectorType>(Src->getType());
+  if (!VTy || !VTy->isScalable() || !getST()->hasSVE())
+    return nullptr;
+
+  Intrinsic::ID IntID;
+
+  // Find intrinsic for the given reduction description.
+  RecurrenceDescriptor::RecurrenceKind RecKind = Desc.getRecurrenceKind();
+  switch (RecKind) {
+  default:
+    IntID = Intrinsic::not_intrinsic;
+    break;
+  case RecurrenceDescriptor::RK_IntegerAdd:
+    IntID = Intrinsic::aarch64_sve_uaddv;
+    break;
+  case RecurrenceDescriptor::RK_IntegerAnd:
+    IntID = Intrinsic::aarch64_sve_andv;
+    break;
+  case RecurrenceDescriptor::RK_IntegerOr:
+    IntID = Intrinsic::aarch64_sve_orv;
+    break;
+  case RecurrenceDescriptor::RK_IntegerXor:
+    IntID = Intrinsic::aarch64_sve_eorv;
+    break;
+  case RecurrenceDescriptor::RK_FloatAdd:
+    IntID = Intrinsic::aarch64_sve_addv;
+    break;
+  }
+
+  if ((RecKind == RecurrenceDescriptor::RK_FloatMinMax) ||
+      (RecKind == RecurrenceDescriptor::RK_IntegerMinMax)) {
+    switch (Desc.getMinMaxRecurrenceKind()) {
+    default:
+      IntID = Intrinsic::not_intrinsic;
+      break;
+    case RecurrenceDescriptor::MRK_SIntMax:
+      IntID = Intrinsic::aarch64_sve_smaxv;
+      break;
+    case RecurrenceDescriptor::MRK_SIntMin:
+      IntID = Intrinsic::aarch64_sve_sminv;
+      break;
+    case RecurrenceDescriptor::MRK_UIntMax:
+      IntID = Intrinsic::aarch64_sve_umaxv;
+      break;
+    case RecurrenceDescriptor::MRK_UIntMin:
+      IntID = Intrinsic::aarch64_sve_uminv;
+      break;
+    case RecurrenceDescriptor::MRK_FloatMin:
+      IntID = NoNaN ? Intrinsic::aarch64_sve_minnmv
+                    : Intrinsic::aarch64_sve_minv;
+      break;
+    case RecurrenceDescriptor::MRK_FloatMax:
+      IntID = NoNaN ? Intrinsic::aarch64_sve_maxnmv
+                    : Intrinsic::aarch64_sve_maxv;
+      break;
+    }
+  }
+
+  if (IntID == Intrinsic::not_intrinsic)
+    return nullptr;
+
+  // Create an all lanes active predicate
+  Constant *Pred = ConstantInt::getTrue(VectorType::getBool(VTy));
+
+  // FUTURE: Most boolean reductions can be done using the 'test' instruction.
+  if (VTy->getElementType()->isIntegerTy(1)) {
+    Type *SrcTy = VectorType::get(Builder.getInt8Ty(), VTy->getElementCount());
+    Src = Builder.CreateZExt(Src, SrcTy);
+  }
+
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *Intrinsic = Intrinsic::getDeclaration(M, IntID, Src->getType());
+  Value *Res = Builder.CreateCall(Intrinsic, { Pred, Src });
+
+  // Some intrinsics produce results larger than the original element type.
+  if (Res->getType() != VTy->getElementType())
+    Res = Builder.CreateTrunc(Res, VTy->getElementType());
+
+  return Res;
+}
+
+Value* AArch64TTIImpl::getOrderedReductionIntrinsic(IRBuilder<> &Builder,
+                                             const RecurrenceDescriptor &Desc,
+                                             bool NoNaN, Value *Src,
+                                             Value *Start, Value *Predicate) {
+  auto *VTy = dyn_cast<VectorType>(Src->getType());
+  if (!VTy || !VTy->isScalable() || !getST()->hasSVE())
+    return nullptr;
+
+  Intrinsic::ID IntID;
+
+  // Find intrinsic for the given reduction description.
+  RecurrenceDescriptor::RecurrenceKind RecKind = Desc.getRecurrenceKind();
+
+  switch (RecKind) {
+  default:
+    IntID = Intrinsic::not_intrinsic;
+    break;
+  case RecurrenceDescriptor::RK_FloatAdd:
+    IntID = Intrinsic::aarch64_sve_adda;
+    break;
+  }
+
+  if (IntID == Intrinsic::not_intrinsic)
+    return nullptr;
+
+  // Return the intrinsic, leaving the code generator to fix up its return type.
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *Intrinsic = Intrinsic::getDeclaration(M, IntID, Src->getType());
+  return Builder.CreateCall(Intrinsic, { Predicate, Start, Src });
 }
 
 unsigned AArch64TTIImpl::getCacheLineSize() {

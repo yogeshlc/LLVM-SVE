@@ -1,4 +1,5 @@
 // RUN: llvm-mc -triple=aarch64-none-linux-gnu < %s | FileCheck %s
+// RUN: llvm-mc -triple=aarch64-none-linux-gnu -mattr=+sve < %s | FileCheck %s
 
 // CHECK: sub w0, w2, #2, lsl #12
 // CHECK: sub w0, w2, #2, lsl #12

@@ -600,7 +600,7 @@ namespace {
   class PrintCallGraphPass : public CallGraphSCCPass {
     std::string Banner;
     raw_ostream &Out;       // raw_ostream to print on.
-    
+
   public:
     static char ID;
     PrintCallGraphPass(const std::string &B, raw_ostream &o)
@@ -622,7 +622,34 @@ namespace {
       return false;
     }
   };
-  
+
+  class BlameCallGraphPass : public CallGraphSCCPass {
+    std::string PassName;
+
+  public:
+    static char ID;
+    BlameCallGraphPass(const std::string &PassName)
+      : CallGraphSCCPass(ID), PassName(PassName) {}
+
+    void getAnalysisUsage(AnalysisUsage &AU) const override {
+      AU.setPreservesAll();
+    }
+
+    bool runOnSCC(CallGraphSCC &SCC) override {
+      for (auto *CGN : SCC)
+        if (CGN->getFunction())
+          for (auto &BB : CGN->getFunction()->getBasicBlockList())
+            for (auto &I : BB.getInstList())
+              if (!I.getMetadata("llvm.blamed_pass")) {
+                Metadata *MDs[] = { MDString::get(I.getContext(), PassName) };
+                MDNode *MDN = MDNode::get(I.getContext(), MDs);
+                I.setMetadata("llvm.blamed_pass", MDN);
+              }
+
+      return false;
+    }
+  };
+
 } // end anonymous namespace.
 
 char PrintCallGraphPass::ID = 0;
@@ -630,6 +657,12 @@ char PrintCallGraphPass::ID = 0;
 Pass *CallGraphSCCPass::createPrinterPass(raw_ostream &O,
                                           const std::string &Banner) const {
   return new PrintCallGraphPass(Banner, O);
+}
+
+char BlameCallGraphPass::ID = 0;
+
+Pass *CallGraphSCCPass::createBlamePass(const std::string &PassName) const {
+  return new BlameCallGraphPass(PassName);
 }
 
 bool CallGraphSCCPass::skipSCC(CallGraphSCC &SCC) const {

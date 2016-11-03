@@ -14,7 +14,7 @@ target triple = "x86_64-apple-macosx10.8.0"
 ;
 
 ;CHECK-LABEL: @foo(
-;CHECK:  <i64 0, i64 -1, i64 -2, i64 -3>
+;CHECK:  <i32 0, i32 -1, i32 -2, i32 -3>
 ;CHECK: ret
 define i32 @foo(i32 %n, i32* nocapture %A) {
   %1 = icmp sgt i32 %n, 0

@@ -70,6 +70,7 @@ public:
   getCrossCopyRegClass(const TargetRegisterClass *RC) const override;
 
   bool requiresRegisterScavenging(const MachineFunction &MF) const override;
+  bool trackLivenessAfterRegAlloc(const MachineFunction &MF) const override;
   bool useFPForScavengingIndex(const MachineFunction &MF) const override;
   bool requiresFrameIndexScavenging(const MachineFunction &MF) const override;
 

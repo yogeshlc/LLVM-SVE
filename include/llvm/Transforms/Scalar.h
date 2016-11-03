@@ -204,9 +204,24 @@ Pass *createLoopIdiomPass();
 
 //===----------------------------------------------------------------------===//
 //
+// LoopVectorizationAnalysis - Determines whether a loop can be vectorized
+// TODO: Is this the right place?
+//
+Pass *createLVAPass();
+
+//===----------------------------------------------------------------------===//
+//
 // LoopVersioningLICM - This pass is a loop versioning pass for LICM.
 //
 Pass *createLoopVersioningLICMPass();
+
+//===----------------------------------------------------------------------===//
+//
+// LoopSpeculativeBoundsCheck - Determines whether speculatively checking loop
+// bounds can be used to enable later optimization if the initial value of a
+// load can guarantee no aliasing will occur.
+//
+Pass *createLoopSpeculativeBoundsCheckPass();
 
 //===----------------------------------------------------------------------===//
 //
@@ -431,6 +446,13 @@ FunctionPass *createAddDiscriminatorsPass();
 FunctionPass *
 createSeparateConstOffsetFromGEPPass(const TargetMachine *TM = nullptr,
                                      bool LowerGEP = false);
+
+//===----------------------------------------------------------------------===//
+//
+// SeparateInvariantFromGepOffset - Split Invariants from complex GEP offsets
+//
+FunctionPass *
+createSeparateInvariantsFromGepOffsetPass();
 
 //===----------------------------------------------------------------------===//
 //

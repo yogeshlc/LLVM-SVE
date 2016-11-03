@@ -129,6 +129,10 @@ public:
   virtual Pass *createPrinterPass(raw_ostream &O,
                                   const std::string &Banner) const = 0;
 
+  /// createBlamePass - Get a Pass capable of tagging instructions with
+  /// the name of the Pass which created them
+  virtual Pass *createBlamePass(const std::string &PassName) const = 0;
+
   /// Each pass is responsible for assigning a pass manager to itself.
   /// PMS is the stack of available pass manager.
   virtual void assignPassManager(PMStack &,
@@ -238,6 +242,10 @@ public:
   Pass *createPrinterPass(raw_ostream &O,
                           const std::string &Banner) const override;
 
+  /// createBlamePass - Get a pass that tags all untagged instructions
+  /// with the name of the pass that created them.
+  Pass *createBlamePass(const std::string &PassName) const override;
+
   /// runOnModule - Virtual method overriden by subclasses to process the module
   /// being operated on.
   virtual bool runOnModule(Module &M) = 0;
@@ -303,6 +311,10 @@ public:
   Pass *createPrinterPass(raw_ostream &O,
                           const std::string &Banner) const override;
 
+  /// createBlamePass - Get a pass that tags all untagged instructions
+  /// with the name of the pass that created them.
+  Pass *createBlamePass(const std::string &PassName) const override;
+
   /// runOnFunction - Virtual method overriden by subclasses to do the
   /// per-function processing of the pass.
   ///
@@ -339,6 +351,10 @@ public:
   /// createPrinterPass - Get a basic block printer pass.
   Pass *createPrinterPass(raw_ostream &O,
                           const std::string &Banner) const override;
+
+  /// createBlamePass - Get a pass that tags all untagged instructions
+  /// with the name of the pass that created them.
+  Pass *createBlamePass(const std::string &PassName) const override;
 
   using llvm::Pass::doInitialization;
   using llvm::Pass::doFinalization;

@@ -16,6 +16,7 @@
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/OptBisect.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/Debug.h"
@@ -53,6 +54,34 @@ public:
 };
 
 char PrintLoopPassWrapper::ID = 0;
+
+class BlameLoopPass : public LoopPass {
+private:
+  std::string PassName;
+
+public:
+  static char ID;
+  BlameLoopPass(const std::string &PassName)
+    : LoopPass(ID), PassName(PassName) {}
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesAll();
+  }
+
+  bool runOnLoop(Loop *L, LPPassManager &) override {
+    for (auto *BB : L->getBlocks())
+      for (auto &I : BB->getInstList())
+        if (!I.getMetadata("llvm.blamed_pass")) {
+          Metadata *MDs[] = { MDString::get(I.getContext(), PassName) };
+          MDNode *MDN = MDNode::get(I.getContext(), MDs);
+          I.setMetadata("llvm.blamed_pass", MDN);
+        }
+
+    return false;
+  }
+};
+
+char BlameLoopPass::ID = 0;
 }
 
 //===----------------------------------------------------------------------===//
@@ -277,6 +306,10 @@ void LPPassManager::dumpPassStructure(unsigned Offset) {
 Pass *LoopPass::createPrinterPass(raw_ostream &O,
                                   const std::string &Banner) const {
   return new PrintLoopPassWrapper(O, Banner);
+}
+
+Pass *LoopPass::createBlamePass(const std::string &PassName) const {
+  return new BlameLoopPass(PassName);
 }
 
 // Check if this pass is suitable for the current LPPassManager, if

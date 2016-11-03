@@ -61,6 +61,9 @@ public:
 
   unsigned getNumberOfRegisters(bool Vector);
   unsigned getRegisterBitWidth(bool Vector);
+  unsigned getRegisterBitWidthUpperBound(bool Vector) {
+    return getRegisterBitWidth(Vector);
+  }
   unsigned getMaxInterleaveFactor(unsigned VF);
   int getArithmeticInstrCost(
       unsigned Opcode, Type *Ty,
@@ -78,6 +81,10 @@ public:
                             unsigned AddressSpace);
   int getGatherScatterOpCost(unsigned Opcode, Type *DataTy, Value *Ptr,
                              bool VariableMask, unsigned Alignment);
+  unsigned getVectorMemoryOpCost(unsigned Opcode, Type *Src, Value *Ptr,
+                                 unsigned Alignment,
+                                 unsigned AddressSpace,
+                                 const MemAccessInfo &Info);
   int getAddressComputationCost(Type *PtrTy, bool IsComplex);
 
   int getIntrinsicInstrCost(Intrinsic::ID IID, Type *RetTy,

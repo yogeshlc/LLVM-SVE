@@ -589,6 +589,7 @@ namespace AArch64SysReg {
     MPIDR_EL1         = 0xc005, // 11  000  0000  0000  101
     REVIDR_EL1        = 0xc006, // 11  000  0000  0000  110
     AIDR_EL1          = 0xc807, // 11  001  0000  0000  111
+    ZIDR_EL1          = 0xc007, // 11  000  0000  0000  111
     DCZID_EL0         = 0xd807, // 11  011  0000  0000  111
     ID_PFR0_EL1       = 0xc008, // 11  000  0000  0001  000
     ID_PFR1_EL1       = 0xc009, // 11  000  0000  0001  001
@@ -615,6 +616,7 @@ namespace AArch64SysReg {
     ID_A64MMFR0_EL1   = 0xc038, // 11  000  0000  0111  000
     ID_A64MMFR1_EL1   = 0xc039, // 11  000  0000  0111  001
     ID_A64MMFR2_EL1   = 0xc03a, // 11  000  0000  0111  010
+    ID_A64ZFR0_EL1    = 0xc024, // 11  000  0000  0100  100
     MVFR0_EL1         = 0xc018, // 11  000  0000  0011  000
     MVFR1_EL1         = 0xc019, // 11  000  0000  0011  001
     MVFR2_EL1         = 0xc01a, // 11  000  0000  0011  010
@@ -788,6 +790,9 @@ namespace AArch64SysReg {
     SDER32_EL3        = 0xf089, // 11  110  0001  0001  001
     CPTR_EL2          = 0xe08a, // 11  100  0001  0001  010
     CPTR_EL3          = 0xf08a, // 11  110  0001  0001  010
+    ZCR_EL1           = 0xc090, // 11  000  0001  0010  000
+    ZCR_EL2           = 0xe090, // 11  100  0001  0010  000
+    ZCR_EL3           = 0xf090, // 11  110  0001  0010  000
     HSTR_EL2          = 0xe08b, // 11  100  0001  0001  011
     HACR_EL2          = 0xe08f, // 11  100  0001  0001  111
     MDCR_EL3          = 0xf099, // 11  110  0001  0011  001
@@ -1210,6 +1215,7 @@ namespace AArch64SysReg {
     CNTV_CVAL_EL02    = 0xef1a, // 11  101  1110  0011  010
     SPSR_EL12         = 0xea00, // 11  101  0100  0000  000
     ELR_EL12          = 0xea01, // 11  101  0100  0000  001
+    ZCR_EL12          = 0xe890, // 11  101  0001  0010  000
 
     // v8.2a registers
     UAO               = 0xc214, // 11  000  0100  0010  100
@@ -1382,6 +1388,110 @@ namespace AArch64II {
     MO_TLS = 0x40
   };
 } // end namespace AArch64II
+
+namespace AArch64 {
+// The number of bits in a SVE register is architecturally defined
+// to be a multiple of this value.  If <M x t> has this number of bits,
+// a <n x M x t> vector can be stored in a SVE register without any
+// redundant bits.  If <M x t> has this number of bits divided by P,
+// a <n x M x t> vector is stored in a SVE register by placing index i
+// in index i*P of a <n x (M*P) x t> vector.  The other elements of the
+// <n x (M*P) x t> vector (such as index 1) are undefined.
+const unsigned SVEBitsPerBlock = 128;
+const unsigned SVEMaxBitsPerVector = 2048;
+} // end namespace AArch64
+
+namespace AArch64SVEPrefetchOp {
+  enum Values {
+    Invalid = -1,
+    PLDL1KEEP = 0x00,
+    PLDL1STRM = 0x01,
+    PLDL2KEEP = 0x02,
+    PLDL2STRM = 0x03,
+    PLDL3KEEP = 0x04,
+    PLDL3STRM = 0x05,
+    PSTL1KEEP = 0x08,
+    PSTL1STRM = 0x09,
+    PSTL2KEEP = 0x0a,
+    PSTL2STRM = 0x0b,
+    PSTL3KEEP = 0x0c,
+    PSTL3STRM = 0x0d,
+  };
+
+  struct Mapper : AArch64NamedImmMapper {
+    const static Mapping Pairs[];
+
+    Mapper();
+  };
+}
+
+namespace AArch64SVEPredPattern {
+  enum Values {
+    Invalid = -1,
+    POW2 = 0x00,
+    VL1 = 0x01,
+    VL2 = 0x02,
+    VL3 = 0x03,
+    VL4 = 0x04,
+    VL5 = 0x05,
+    VL6 = 0x06,
+    VL7 = 0x07,
+    VL8 = 0x08,
+    VL16 = 0x09,
+    VL32 = 0x0a,
+    VL64 = 0x0b,
+    VL128 = 0x0c,
+    VL256 = 0x0d,
+    MUL4 = 0x1d,
+    MUL3 = 0x1e,
+    ALL = 0x1f,
+  };
+
+  struct Mapper : AArch64NamedImmMapper {
+    const static Mapping Pairs[];
+
+    Mapper();
+  };
+}
+
+namespace AArch64SVEFpImmZeroOne {
+  enum  Values {
+    Invalid = -1,
+    ZERO = 0,
+    ONE = 1
+  };
+
+  struct Mapper : AArch64NamedImmMapper {
+    const static Mapping Pairs[];
+    Mapper();
+  };
+}
+
+namespace AArch64SVEFpImmHalfOne {
+  enum  Values {
+    Invalid = -1,
+    ZERO_POINT_FIVE = 0,
+    ONE = 1
+  };
+
+  struct Mapper : AArch64NamedImmMapper {
+    const static Mapping Pairs[];
+    Mapper();
+  };
+}
+
+namespace AArch64SVEFpImmHalfTwo {
+  enum  Values {
+    Invalid = -1,
+    ZERO_POINT_FIVE = 0,
+    TWO = 1
+  };
+
+  struct Mapper : AArch64NamedImmMapper {
+    const static Mapping Pairs[];
+    Mapper();
+  };
+}
 
 } // end namespace llvm
 

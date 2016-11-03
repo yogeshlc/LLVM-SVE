@@ -176,6 +176,7 @@ const AArch64NamedImmMapper::Mapping AArch64SysReg::MRSMapper::MRSMappings[] = {
   {"mpidr_el1", MPIDR_EL1, {}},
   {"revidr_el1", REVIDR_EL1, {}},
   {"aidr_el1", AIDR_EL1, {}},
+  {"zidr_el1", ZIDR_EL1, {AArch64::FeatureSVE}},
   {"dczid_el0", DCZID_EL0, {}},
   {"id_pfr0_el1", ID_PFR0_EL1, {}},
   {"id_pfr1_el1", ID_PFR1_EL1, {}},
@@ -203,6 +204,7 @@ const AArch64NamedImmMapper::Mapping AArch64SysReg::MRSMapper::MRSMappings[] = {
   {"id_aa64mmfr0_el1", ID_A64MMFR0_EL1, {}},
   {"id_aa64mmfr1_el1", ID_A64MMFR1_EL1, {}},
   {"id_aa64mmfr2_el1", ID_A64MMFR2_EL1, {AArch64::HasV8_2aOps}},
+  {"id_aa64zfr0_el1", ID_A64ZFR0_EL1, {AArch64::FeatureSVE}},
   {"mvfr0_el1", MVFR0_EL1, {}},
   {"mvfr1_el1", MVFR1_EL1, {}},
   {"mvfr2_el1", MVFR2_EL1, {}},
@@ -388,6 +390,9 @@ const AArch64NamedImmMapper::Mapping AArch64SysReg::SysRegMapper::SysRegMappings
   {"sder32_el3", SDER32_EL3, {}},
   {"cptr_el2", CPTR_EL2, {}},
   {"cptr_el3", CPTR_EL3, {}},
+  {"zcr_el1", ZCR_EL1, {AArch64::FeatureSVE}},
+  {"zcr_el2", ZCR_EL2, {AArch64::FeatureSVE}},
+  {"zcr_el3", ZCR_EL3, {AArch64::FeatureSVE}},
   {"hstr_el2", HSTR_EL2, {}},
   {"hacr_el2", HACR_EL2, {}},
   {"mdcr_el3", MDCR_EL3, {}},
@@ -812,6 +817,7 @@ const AArch64NamedImmMapper::Mapping AArch64SysReg::SysRegMapper::SysRegMappings
   {"cntv_cval_el02", CNTV_CVAL_EL02, {AArch64::HasV8_1aOps}},
   {"spsr_el12", SPSR_EL12, {AArch64::HasV8_1aOps}},
   {"elr_el12", ELR_EL12, {AArch64::HasV8_1aOps}},
+  {"zcr_el12", ZCR_EL12, {AArch64::FeatureSVE}},
 
   // v8.2a registers
   {"uao",           UAO,           {AArch64::HasV8_2aOps}},
@@ -942,3 +948,65 @@ const AArch64NamedImmMapper::Mapping AArch64TLBI::TLBIMapper::TLBIMappings[] = {
 
 AArch64TLBI::TLBIMapper::TLBIMapper()
   : AArch64NamedImmMapper(TLBIMappings, 0) {}
+
+const AArch64NamedImmMapper::Mapping AArch64SVEPrefetchOp::Mapper::Pairs[] = {
+  {"pldl1keep", PLDL1KEEP, {}},
+  {"pldl1strm", PLDL1STRM, {}},
+  {"pldl2keep", PLDL2KEEP, {}},
+  {"pldl2strm", PLDL2STRM, {}},
+  {"pldl3keep", PLDL3KEEP, {}},
+  {"pldl3strm", PLDL3STRM, {}},
+  {"pstl1keep", PSTL1KEEP, {}},
+  {"pstl1strm", PSTL1STRM, {}},
+  {"pstl2keep", PSTL2KEEP, {}},
+  {"pstl2strm", PSTL2STRM, {}},
+  {"pstl3keep", PSTL3KEEP, {}},
+  {"pstl3strm", PSTL3STRM, {}}
+};
+
+AArch64SVEPrefetchOp::Mapper::Mapper()
+  : AArch64NamedImmMapper(Pairs, 32) {}
+
+const AArch64NamedImmMapper::Mapping AArch64SVEPredPattern::Mapper::Pairs[] = {
+  {"pow2",  POW2, {}},
+  {"vl1",   VL1, {}},
+  {"vl2",   VL2, {}},
+  {"vl3",   VL3, {}},
+  {"vl4",   VL4, {}},
+  {"vl5",   VL5, {}},
+  {"vl6",   VL6, {}},
+  {"vl7",   VL7, {}},
+  {"vl8",   VL8, {}},
+  {"vl16",  VL16, {}},
+  {"vl32",  VL32, {}},
+  {"vl64",  VL64, {}},
+  {"vl128", VL128, {}},
+  {"vl256", VL256, {}},
+  {"mul4",  MUL4, {}},
+  {"mul3",  MUL3, {}},
+  {"all",   ALL, {}},
+};
+
+AArch64SVEPredPattern::Mapper::Mapper()
+  : AArch64NamedImmMapper(Pairs, 32) {}
+
+const AArch64NamedImmMapper::Mapping AArch64SVEFpImmZeroOne::Mapper::Pairs[] = {
+  {"0.0", ZERO, {}}, {"1.0", ONE, {}}
+};
+
+AArch64SVEFpImmZeroOne::Mapper::Mapper()
+  : AArch64NamedImmMapper(Pairs, 32) {}
+
+const AArch64NamedImmMapper::Mapping AArch64SVEFpImmHalfOne::Mapper::Pairs[] = {
+  {"0.5", ZERO_POINT_FIVE, {}}, {"1.0", ONE, {}}
+};
+
+AArch64SVEFpImmHalfOne::Mapper::Mapper()
+  : AArch64NamedImmMapper(Pairs, 32) {}
+
+const AArch64NamedImmMapper::Mapping AArch64SVEFpImmHalfTwo::Mapper::Pairs[] = {
+  {"0.5", ZERO_POINT_FIVE, {}}, {"2.0", TWO, {}}
+};
+
+AArch64SVEFpImmHalfTwo::Mapper::Mapper()
+  : AArch64NamedImmMapper(Pairs, 32) {}

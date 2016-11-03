@@ -22,6 +22,7 @@
 #include "llvm/Analysis/AliasSetTracker.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/ValueHandle.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -177,7 +178,8 @@ public:
     Instruction *getDestination(const LoopAccessInfo &LAI) const;
 
     /// \brief Dependence types that don't prevent vectorization.
-    static bool isSafeForVectorization(DepType Type);
+    static bool isSafeForVectorization(DepType Type,
+                                     const TargetTransformInfo *TTI);
 
     /// \brief Lexically forward dependence.
     bool isForward() const;
@@ -193,8 +195,9 @@ public:
                const SmallVectorImpl<Instruction *> &Instrs) const;
   };
 
-  MemoryDepChecker(PredicatedScalarEvolution &PSE, const Loop *L)
-      : PSE(PSE), InnermostLoop(L), AccessIdx(0),
+  MemoryDepChecker(PredicatedScalarEvolution &PSE, const Loop *L,
+                   const TargetTransformInfo *TTI)
+      : PSE(PSE), InnermostLoop(L), TTI(TTI), AccessIdx(0),
         ShouldRetryWithRuntimeCheck(false), SafeForVectorization(true),
         RecordDependences(true) {}
 
@@ -216,6 +219,15 @@ public:
     ++AccessIdx;
   }
 
+  /// \brief Register the location (instructions are given increasing numbers)
+  /// of a write access.
+  void addAccess(MemSetInst *MSI) {
+    Value *Ptr = MSI->getRawDest();
+    Accesses[MemAccessInfo(Ptr, false)].push_back(AccessIdx);
+    InstMap.push_back(MSI);
+    ++AccessIdx;
+  }
+
   /// \brief Check whether the dependencies between the accesses are safe.
   ///
   /// Only checks sets with elements in \p CheckDeps.
@@ -229,6 +241,10 @@ public:
   /// \brief The maximum number of bytes of a vector register we can vectorize
   /// the accesses safely with.
   unsigned getMaxSafeDepDistBytes() { return MaxSafeDepDistBytes; }
+
+  /// \brief the maximum number of bytes we can vectorize without introducing
+  /// issues for hardware store->load forwarding.
+  unsigned getMaxDepDistBytesWithSLF() { return MaxDepDistWithSLF; }
 
   /// \brief In same cases when the dependency check fails we can still
   /// vectorize the loop with a dynamic array access check.
@@ -273,6 +289,7 @@ private:
   /// that a memory access is strided and doesn't wrap.
   PredicatedScalarEvolution &PSE;
   const Loop *InnermostLoop;
+  const TargetTransformInfo *TTI;
 
   /// \brief Maps access locations (ptr, read/write) to program order.
   DenseMap<MemAccessInfo, std::vector<unsigned> > Accesses;
@@ -285,6 +302,10 @@ private:
 
   // We can access this many bytes in parallel safely.
   unsigned MaxSafeDepDistBytes;
+
+  // Maximum safe VF which should not introduce problems for h/w store->load
+  // forwarding.
+  unsigned MaxDepDistWithSLF;
 
   /// \brief If we see a non-constant dependence distance we can still try to
   /// vectorize this loop with runtime checks.
@@ -356,7 +377,8 @@ public:
           AliasSetId(AliasSetId), Expr(Expr) {}
   };
 
-  RuntimePointerChecking(ScalarEvolution *SE) : Need(false), SE(SE) {}
+  RuntimePointerChecking(ScalarEvolution *SE) : Need(false), Strided(false),
+                                                SE(SE) {}
 
   /// Reset the state of the pointer runtime information.
   void reset() {
@@ -445,6 +467,9 @@ public:
   /// This flag indicates if we need to add the runtime check.
   bool Need;
 
+  /// This flag indicates if the pointer accesses are strided.
+  bool Strided;
+
   /// Information about the pointers that may require checking.
   SmallVector<PointerInfo, 2> Pointers;
 
@@ -512,8 +537,8 @@ private:
 class LoopAccessInfo {
 public:
   LoopAccessInfo(Loop *L, ScalarEvolution *SE, const DataLayout &DL,
-                 const TargetLibraryInfo *TLI, AliasAnalysis *AA,
-                 DominatorTree *DT, LoopInfo *LI,
+                 const TargetLibraryInfo *TLI, const TargetTransformInfo *TTI,
+                 AliasAnalysis *AA, DominatorTree *DT, LoopInfo *LI,
                  const ValueToValueMap &Strides);
 
   /// Return true we can analyze the memory accesses in the loop and there are
@@ -538,7 +563,7 @@ public:
   /// Returns true if the value V is uniform within the loop.
   bool isUniform(Value *V) const;
 
-  unsigned getMaxSafeDepDistBytes() const { return MaxSafeDepDistBytes; }
+  unsigned getMaxSafeDepDistBytes() const;
   unsigned getNumStores() const { return NumStores; }
   unsigned getNumLoads() const { return NumLoads;}
 
@@ -587,7 +612,11 @@ public:
   /// If the loop has any store to invariant address, then it returns true,
   /// else returns false.
   bool hasStoreToLoopInvariantAddress() const {
-    return StoreToLoopInvariantAddress;
+    return !InvariantStores.empty();
+  }
+
+  const SmallPtrSetImpl<StoreInst*> &getInvariantStores() const {
+    return InvariantStores;
   }
 
   /// Used to add runtime SCEV checks. Simplifies SCEV expressions and converts
@@ -618,6 +647,7 @@ private:
   Loop *TheLoop;
   const DataLayout &DL;
   const TargetLibraryInfo *TLI;
+  const TargetTransformInfo *TTI;
   AliasAnalysis *AA;
   DominatorTree *DT;
   LoopInfo *LI;
@@ -626,17 +656,22 @@ private:
   unsigned NumStores;
 
   unsigned MaxSafeDepDistBytes;
+  unsigned MaxDepDistBytesWithSLF;
 
   /// \brief Cache the result of analyzeLoop.
   bool CanVecMem;
 
-  /// \brief Indicator for storing to uniform addresses.
-  /// If a loop has write to a loop invariant address then it should be true.
-  bool StoreToLoopInvariantAddress;
+  /// \brief Set of stores to uniform addresses.
+  SmallPtrSet<StoreInst*, 5> InvariantStores;
+  /// \brief Set of stores to uniform addresses.
+  SmallPtrSet<MemSetInst*, 5> InvariantMemSets;
 
   /// \brief The diagnostics report generated for the analysis.  E.g. why we
   /// couldn't analyze the loop.
   Optional<LoopAccessReport> Report;
+
+  /// Allows analysis of uncounted loops (trip count undefined)
+  bool AllowUncountedLoops;
 };
 
 Value *stripIntegerCast(Value *V);
@@ -716,6 +751,7 @@ private:
   // The used analysis passes.
   ScalarEvolution *SE;
   const TargetLibraryInfo *TLI;
+  const TargetTransformInfo *TTI;
   AliasAnalysis *AA;
   DominatorTree *DT;
   LoopInfo *LI;

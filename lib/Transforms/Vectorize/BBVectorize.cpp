@@ -906,8 +906,12 @@ namespace {
       // Currently, vector GEPs exist only with one index.
       if (G->getNumIndices() != 1)
         return false;
-    } else if (!(I->isBinaryOp() || isa<ShuffleVectorInst>(I) ||
-        isa<ExtractElementInst>(I) || isa<InsertElementInst>(I))) {
+    } else if (!(I->isBinaryOp() ||
+                 // Only handle ShuffleVectors with known-constant masks.
+                 (isa<ShuffleVectorInst>(I) &&
+                  isa<Constant>(cast<ShuffleVectorInst>(I)->getMask())) ||
+                 isa<ExtractElementInst>(I) ||
+                 isa<InsertElementInst>(I))) {
       return false;
     }
 
@@ -1044,6 +1048,12 @@ namespace {
         return false;
       }
     } else if (TTI) {
+      // Only pair ShuffleVectors that have constant masks.  We checked that
+      // I has a constant mask in isInstVectorizable.
+      if (auto *JSV = dyn_cast<ShuffleVectorInst>(J))
+        if (!isa<Constant>(JSV->getMask()))
+          return false;
+
       unsigned ICost = getInstrCost(I->getOpcode(), IT1, IT2);
       unsigned JCost = getInstrCost(J->getOpcode(), JT1, JT2);
       Type *VT1 = getVecTypeForPair(IT1, JT1),
@@ -2347,8 +2357,11 @@ namespace {
                      unsigned NumInElem1, unsigned IdxOffset,
                      std::vector<Constant*> &Mask) {
     unsigned NumElem1 = J->getType()->getVectorNumElements();
+    SmallVector<int, 16> JMask;
+    if (!cast<ShuffleVectorInst>(J)->getShuffleMask(JMask))
+      llvm_unreachable("ShuffleVector with variable mask should not be paired");
     for (unsigned v = 0; v < NumElem1; ++v) {
-      int m = cast<ShuffleVectorInst>(J)->getMaskValue(v);
+      int m = JMask[v];
       if (m < 0) {
         Mask[v+MaskOffset] = UndefValue::get(Type::getInt32Ty(Context));
       } else {
@@ -2490,6 +2503,7 @@ namespace {
       isa<ShuffleVectorInst>(L) &&
         (LOp->getType() != L->getType() || HOp->getType() != H->getType());
 
+    SmallVector<int, 16> LMask, HMask;
     if ((LEE || LSV) && (HEE || HSV) && !IsSizeChangeShuffle) {
       // We can have at most two unique vector inputs.
       bool CanUseInputs = true;
@@ -2497,6 +2511,9 @@ namespace {
       if (LEE) {
         I1 = LEE->getOperand(0);
       } else {
+        if (!LSV->getShuffleMask(LMask))
+          llvm_unreachable("ShuffleVector with variable mask should"
+                           " not be paired");
         I1 = LSV->getOperand(0);
         I2 = LSV->getOperand(1);
         if (I2 == I1 || isa<UndefValue>(I2))
@@ -2510,6 +2527,9 @@ namespace {
         else if (I3 != I1 && I3 != I2)
           CanUseInputs = false;
       } else {
+        if (!HSV->getShuffleMask(HMask))
+          llvm_unreachable("ShuffleVector with variable mask should"
+                           " not be paired");
         Value *I3 = HSV->getOperand(0);
         if (!I2 && I3 != I1)
           I2 = I3;
@@ -2546,7 +2566,7 @@ namespace {
               cast<ConstantInt>(LEE->getOperand(1))->getSExtValue();
             INum = LEE->getOperand(0) == I1 ? 0 : 1;
           } else {
-            Idx = LSV->getMaskValue(i);
+            Idx = LMask[i];
             if (Idx < (int) LOpElem) {
               INum = LSV->getOperand(0) == I1 ? 0 : 1;
             } else {
@@ -2564,7 +2584,7 @@ namespace {
               cast<ConstantInt>(HEE->getOperand(1))->getSExtValue();
             INum = HEE->getOperand(0) == I1 ? 0 : 1;
           } else {
-            Idx = HSV->getMaskValue(i);
+            Idx = HMask[i];
             if (Idx < (int) HOpElem) {
               INum = HSV->getOperand(0) == I1 ? 0 : 1;
             } else {

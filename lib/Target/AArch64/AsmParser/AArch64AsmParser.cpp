@@ -37,6 +37,8 @@ using namespace llvm;
 
 namespace {
 
+enum class RegKind {Scalar, NeonVector, SVEVector, SVEPredicate };
+
 class AArch64Operand;
 
 class AArch64AsmParser : public MCTargetAsmParser {
@@ -44,7 +46,7 @@ private:
   StringRef Mnemonic; ///< Instruction mnemonic.
 
   // Map of register aliases registers via the .req directive.
-  StringMap<std::pair<bool, unsigned> > RegisterReqs;
+  StringMap<std::pair<RegKind, unsigned> > RegisterReqs;
 
   AArch64TargetStreamer &getTargetStreamer() {
     MCTargetStreamer &TS = *getParser().getStreamer().getTargetStreamer();
@@ -56,12 +58,19 @@ private:
   bool parseSysAlias(StringRef Name, SMLoc NameLoc, OperandVector &Operands);
   AArch64CC::CondCode parseCondCodeString(StringRef Cond);
   bool parseCondCode(OperandVector &Operands, bool invertCondCode);
+  unsigned matchReqRegisterNameAlias(StringRef Name, RegKind Kind);
   unsigned matchRegisterNameAlias(StringRef Name, bool isVector);
+  unsigned matchSVEPredicateNameAlias(StringRef Name);
+  unsigned matchSVEVectorNameAlias(StringRef Name);
   int tryParseRegister();
   int tryMatchVectorRegister(StringRef &Kind, bool expected);
+  int tryMatchSVEPredicateRegister(StringRef &Kind);
+  int tryMatchSVEVectorRegister(const AsmToken &Tok, StringRef &Kind,
+                                bool Expected);
   bool parseRegister(OperandVector &Operands);
   bool parseSymbolicImmVal(const MCExpr *&ImmVal);
   bool parseVectorList(OperandVector &Operands);
+  bool parseOptionalMulVl(OperandVector &Operands);
   bool parseOperand(OperandVector &Operands, bool isCondCode,
                     bool invertCondCode);
 
@@ -99,6 +108,7 @@ private:
   OperandMatchResultTy tryParseMRSSystemRegister(OperandVector &Operands);
   OperandMatchResultTy tryParseSysReg(OperandVector &Operands);
   OperandMatchResultTy tryParseSysCROperand(OperandVector &Operands);
+  template<class MapperClass, int MaxID>
   OperandMatchResultTy tryParsePrefetch(OperandVector &Operands);
   OperandMatchResultTy tryParsePSBHint(OperandVector &Operands);
   OperandMatchResultTy tryParseAdrpLabel(OperandVector &Operands);
@@ -107,7 +117,18 @@ private:
   OperandMatchResultTy tryParseAddSubImm(OperandVector &Operands);
   OperandMatchResultTy tryParseGPR64sp0Operand(OperandVector &Operands);
   bool tryParseVectorRegister(OperandVector &Operands);
+  bool tryParseSVEPredicate(OperandVector &Operands);
   OperandMatchResultTy tryParseGPRSeqPair(OperandVector &Operands);
+  OperandMatchResultTy tryParseGPRWithOffset(OperandVector &Operands);
+  OperandMatchResultTy tryParseSVEVectorWithOffset(OperandVector &Operands);
+  OperandMatchResultTy tryParseSVEVectorList(OperandVector &Operands);
+  OperandMatchResultTy tryParseSVEPattern(OperandVector &Operands);
+  OperandMatchResultTy tryParseMulImm4(OperandVector &Operands);
+
+  void cvtXPredW(MCInst &Inst, const OperandVector &Operands);
+  void cvtXWPatternImm(MCInst &Inst, const OperandVector &Operands);
+  template<class MapperClass>
+  OperandMatchResultTy tryParseNamedFPImm(OperandVector &Operands);
 
 public:
   enum AArch64MatchResultTy {
@@ -174,7 +195,7 @@ private:
 
   struct RegOp {
     unsigned RegNum;
-    bool isVector;
+    RegKind Kind;
   };
 
   struct VectorListOp {
@@ -182,6 +203,7 @@ private:
     unsigned Count;
     unsigned NumElements;
     unsigned ElementKind;
+    bool     IsSVE;
   };
 
   struct VectorIndexOp {
@@ -436,41 +458,48 @@ public:
 
   bool isImm() const override { return Kind == k_Immediate; }
   bool isMem() const override { return false; }
-  bool isSImm9() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= -256 && Val < 256);
+
+  template <int Width>
+  bool isSImm() const {
+    return isSImmScaled<Width, 1>();
   }
-  bool isSImm7s4() const {
+
+  template <int Bits, int Scale>
+  bool isSImmScaled() const {
     if (!isImm())
       return false;
     const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
     if (!MCE)
       return false;
+
     int64_t Val = MCE->getValue();
-    return (Val >= -256 && Val <= 252 && (Val & 3) == 0);
+    int64_t Shift = Bits - 1;
+    int64_t MinVal = (int64_t(1) << Shift) * -Scale;
+    int64_t MaxVal = ((int64_t(1) << Shift) - 1) * Scale;
+    return Val >= MinVal && Val <= MaxVal && (Val % Scale) == 0;
   }
-  bool isSImm7s8() const {
+
+  template <int Bits, int Scale>
+  bool isUImmScaled() const {
     if (!isImm())
       return false;
     const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
     if (!MCE)
       return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= -512 && Val <= 504 && (Val & 7) == 0);
+
+    uint64_t Val = MCE->getValue();
+    uint64_t MaxVal = ((uint64_t(1) << Bits) - 1) * Scale;
+    return Val <= MaxVal && (Val % Scale) == 0;
   }
-  bool isSImm7s16() const {
+
+  bool isSVEPattern() const {
     if (!isImm())
       return false;
     const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
     if (!MCE)
       return false;
     int64_t Val = MCE->getValue();
-    return (Val >= -1024 && Val <= 1008 && (Val & 15) == 0);
+    return (Val >= 0 && Val < 32);
   }
 
   bool isSymbolicUImm12Offset(const MCExpr *Expr, unsigned Scale) const {
@@ -518,192 +547,59 @@ public:
     return (Val % Scale) == 0 && Val >= 0 && (Val / Scale) < 0x1000;
   }
 
-  bool isImm0_1() const {
+  template <int64_t Low, int64_t High>
+  bool isImmRange() const {
     if (!isImm())
       return false;
     const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
     if (!MCE)
       return false;
     int64_t Val = MCE->getValue();
-    return (Val >= 0 && Val < 2);
+    return (Val >= Low && Val <= High);
   }
-  bool isImm0_7() const {
+
+  // NOTE: Also used for isLogicalImmNot as anything that can be represented as
+  // a logical immediate can always be represented when inverted.
+  template <typename T>
+  bool isLogicalImm() const {
     if (!isImm())
       return false;
     const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
     if (!MCE)
       return false;
+
     int64_t Val = MCE->getValue();
-    return (Val >= 0 && Val < 8);
+    int64_t SVal = typename std::make_signed<T>::type(Val);
+    int64_t UVal = typename std::make_unsigned<T>::type(Val);
+    if (Val != SVal && Val != UVal)
+      return false;
+
+    return AArch64_AM::isLogicalImmediate(UVal, sizeof(T) * 8);
   }
-  bool isImm1_8() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val > 0 && Val < 9);
+
+  template <typename T>
+  bool isSVEPreferredLogicalImm() const {
+    return isLogicalImm<T>() && !isSVECpyImm();
   }
-  bool isImm0_15() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 0 && Val < 16);
-  }
-  bool isImm1_16() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val > 0 && Val < 17);
-  }
-  bool isImm0_31() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 0 && Val < 32);
-  }
-  bool isImm1_31() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 1 && Val < 32);
-  }
-  bool isImm1_32() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 1 && Val < 33);
-  }
-  bool isImm0_63() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 0 && Val < 64);
-  }
-  bool isImm1_63() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 1 && Val < 64);
-  }
-  bool isImm1_64() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 1 && Val < 65);
-  }
-  bool isImm0_127() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 0 && Val < 128);
-  }
-  bool isImm0_255() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 0 && Val < 256);
-  }
-  bool isImm0_65535() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 0 && Val < 65536);
-  }
-  bool isImm32_63() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    return (Val >= 32 && Val < 64);
-  }
-  bool isLogicalImm32() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = MCE->getValue();
-    if (Val >> 32 != 0 && Val >> 32 != ~0LL)
-      return false;
-    Val &= 0xFFFFFFFF;
-    return AArch64_AM::isLogicalImmediate(Val, 32);
-  }
-  bool isLogicalImm64() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    return AArch64_AM::isLogicalImmediate(MCE->getValue(), 64);
-  }
-  bool isLogicalImm32Not() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    int64_t Val = ~MCE->getValue() & 0xFFFFFFFF;
-    return AArch64_AM::isLogicalImmediate(Val, 32);
-  }
-  bool isLogicalImm64Not() const {
-    if (!isImm())
-      return false;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
-    if (!MCE)
-      return false;
-    return AArch64_AM::isLogicalImmediate(~MCE->getValue(), 64);
-  }
+
   bool isShiftedImm() const { return Kind == k_ShiftedImm; }
+
+  template <int Width>
   bool isAddSubImm() const {
     if (!isShiftedImm() && !isImm())
       return false;
 
     const MCExpr *Expr;
+    unsigned Shift;
 
     // An ADD/SUB shifter is either 'lsl #0' or 'lsl #12'.
     if (isShiftedImm()) {
-      unsigned Shift = ShiftedImm.ShiftAmount;
+      Shift = ShiftedImm.ShiftAmount;
       Expr = ShiftedImm.Val;
-      if (Shift != 0 && Shift != 12)
+      if (Shift != 0 && Shift != Width)
         return false;
     } else {
+      Shift = 0;
       Expr = getImm();
     }
 
@@ -726,9 +622,15 @@ public:
     }
 
     // Otherwise it should be a real immediate in range:
-    const MCConstantExpr *CE = cast<MCConstantExpr>(Expr);
-    return CE->getValue() >= 0 && CE->getValue() <= 0xfff;
+    const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(Expr);
+    if (!CE)
+      return false;
+
+    const int64_t Val = CE->getValue() << Shift;
+    const int64_t Mask = (1 << int64_t(Width)) - 1;
+    return ((Val & Mask) == Val) || ((Val & (Mask << Width)) == Val);
   }
+  template <int Width>
   bool isAddSubImmNeg() const {
     if (!isShiftedImm() && !isImm())
       return false;
@@ -739,14 +641,15 @@ public:
     if (isShiftedImm()) {
       unsigned Shift = ShiftedImm.ShiftAmount;
       Expr = ShiftedImm.Val;
-      if (Shift != 0 && Shift != 12)
+      if (Shift != 0 && Shift != Width)
         return false;
     } else
       Expr = getImm();
 
     // Otherwise it should be a real negative immediate in range:
     const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(Expr);
-    return CE != nullptr && CE->getValue() < 0 && -CE->getValue() <= 0xfff;
+    const int64_t MaxVal = (1 << int64_t(Width)) - 1;
+    return CE != nullptr && CE->getValue() < 0 && -CE->getValue() <= MaxVal;
   }
   bool isCondCode() const { return Kind == k_CondCode; }
   bool isSIMDImmType10() const {
@@ -917,38 +820,96 @@ public:
     if (!isSysReg() || isSystemPStateFieldWithImm0_1()) return false;
     return SysReg.PStateField != -1U;
   }
-  bool isReg() const override { return Kind == k_Register && !Reg.isVector; }
-  bool isVectorReg() const { return Kind == k_Register && Reg.isVector; }
+  bool isReg() const override {
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar;
+  }
+  bool isVectorReg() const {
+    return Kind == k_Register && Reg.Kind == RegKind::NeonVector;
+  }
+  bool isAnyReg() const {
+    return isReg() || isVectorReg() || isSVEVectorReg() || isSVEPredicateReg()
+                   || isSVEPredicateRedReg();
+  }
   bool isVectorRegLo() const {
-    return Kind == k_Register && Reg.isVector &&
+    return Kind == k_Register && Reg.Kind == RegKind::NeonVector &&
            AArch64MCRegisterClasses[AArch64::FPR128_loRegClassID].contains(
                Reg.RegNum);
   }
+  bool isSVEVectorReg() const {
+    return Kind == k_Register && Reg.Kind == RegKind::SVEVector &&
+      AArch64MCRegisterClasses[AArch64::ZPRRegClassID].contains(Reg.RegNum);
+  }
+  bool isSVEPredicateReg() const {
+    return Kind == k_Register && Reg.Kind == RegKind::SVEPredicate &&
+      AArch64MCRegisterClasses[AArch64::PPRRegClassID].contains(Reg.RegNum);
+  }
+  bool isSVEPredicateRedReg() const {
+    return Kind == k_Register && Reg.Kind == RegKind::SVEPredicate &&
+      AArch64MCRegisterClasses[AArch64::PPRRRegClassID].contains(Reg.RegNum);
+  }
+
+  bool isFPR8asZPR() const {
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
+      AArch64MCRegisterClasses[AArch64::FPR8RegClassID].contains(Reg.RegNum);
+  }
+  bool isFPR16asZPR() const {
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
+    AArch64MCRegisterClasses[AArch64::FPR16RegClassID].contains(Reg.RegNum);
+  }
+  bool isFPR32asZPR() const {
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
+    AArch64MCRegisterClasses[AArch64::FPR32RegClassID].contains(Reg.RegNum);
+  }
+  bool isFPR64asZPR() const {
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
+    AArch64MCRegisterClasses[AArch64::FPR64RegClassID].contains(Reg.RegNum);
+  }
+
+  template <char ElementKind, int NumRegs>
+  bool isSVEVectorList() const {
+    if (Kind != k_VectorList)
+      return false;
+    if (VectorList.Count != NumRegs)
+      return false;
+    if (!VectorList.IsSVE)
+      return false;
+    return (VectorList.ElementKind == ElementKind);
+  }
   bool isGPR32as64() const {
-    return Kind == k_Register && !Reg.isVector &&
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
       AArch64MCRegisterClasses[AArch64::GPR64RegClassID].contains(Reg.RegNum);
   }
+  bool isGPR64as32() const {
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
+      AArch64MCRegisterClasses[AArch64::GPR32RegClassID].contains(Reg.RegNum);
+  }
   bool isWSeqPair() const {
-    return Kind == k_Register && !Reg.isVector &&
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
            AArch64MCRegisterClasses[AArch64::WSeqPairsClassRegClassID].contains(
                Reg.RegNum);
   }
   bool isXSeqPair() const {
-    return Kind == k_Register && !Reg.isVector &&
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
            AArch64MCRegisterClasses[AArch64::XSeqPairsClassRegClassID].contains(
                Reg.RegNum);
   }
 
   bool isGPR64sp0() const {
-    return Kind == k_Register && !Reg.isVector &&
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
       AArch64MCRegisterClasses[AArch64::GPR64spRegClassID].contains(Reg.RegNum);
+  }
+
+  template <unsigned RegClassID>
+  bool isGPR64Offset() const {
+    return Kind == k_Register && Reg.Kind == RegKind::Scalar &&
+      AArch64MCRegisterClasses[RegClassID].contains(Reg.RegNum);
   }
 
   /// Is this a vector list with the type implicit (presumably attached to the
   /// instruction itself)?
   template <unsigned NumRegs> bool isImplicitlyTypedVectorList() const {
     return Kind == k_VectorList && VectorList.Count == NumRegs &&
-           !VectorList.ElementKind;
+           !VectorList.ElementKind && !VectorList.IsSVE;
   }
 
   template <unsigned NumRegs, unsigned NumElements, char ElementKind>
@@ -958,6 +919,8 @@ public:
     if (VectorList.Count != NumRegs)
       return false;
     if (VectorList.ElementKind != ElementKind)
+      return false;
+    if (VectorList.IsSVE)
       return false;
     return VectorList.NumElements == NumElements;
   }
@@ -977,12 +940,25 @@ public:
   bool isVectorIndexD() const {
     return Kind == k_VectorIndex && VectorIndex.Val < 2;
   }
+  bool isSVEVectorIndexB() const {
+    return Kind == k_VectorIndex && VectorIndex.Val < 64;
+  }
+  bool isSVEVectorIndexH() const {
+    return Kind == k_VectorIndex && VectorIndex.Val < 32;
+  }
+  bool isSVEVectorIndexS() const {
+    return Kind == k_VectorIndex && VectorIndex.Val < 16;
+  }
+  bool isSVEVectorIndexD() const {
+    return Kind == k_VectorIndex && VectorIndex.Val < 8;
+  }
   bool isToken() const override { return Kind == k_Token; }
   bool isTokenEqual(StringRef Str) const {
     return Kind == k_Token && getToken() == Str;
   }
   bool isSysCR() const { return Kind == k_SysCR; }
   bool isPrefetch() const { return Kind == k_Prefetch; }
+  bool isSVEPrefetch() const { return Kind == k_Prefetch; }
   bool isPSBHint() const { return Kind == k_PSBHint; }
   bool isShiftExtend() const { return Kind == k_ShiftExtend; }
   bool isShifter() const {
@@ -1005,6 +981,33 @@ public:
             ET == AArch64_AM::UXTX || ET == AArch64_AM::SXTX ||
             ET == AArch64_AM::LSL) &&
            getShiftExtendAmount() <= 4;
+  }
+
+  template <int Max>
+  bool isSVEShift() const {
+    if (!isShiftExtend())
+      return false;
+
+    if (getShiftExtendAmount() > Max)
+      return false;
+
+    AArch64_AM::ShiftExtendType ET = getShiftExtendType();
+    return ET == AArch64_AM::LSL;
+  }
+
+  template <int Max, bool Signed>
+  bool isSVEExtend() const {
+    if (!isShiftExtend())
+      return false;
+
+    if (getShiftExtendAmount() > Max)
+      return false;
+
+    AArch64_AM::ShiftExtendType ET = getShiftExtendType();
+    if (Signed)
+      return ET == AArch64_AM::SXTW;
+    else
+      return ET == AArch64_AM::UXTW;
   }
 
   bool isExtend64() const {
@@ -1125,7 +1128,7 @@ public:
   // ambiguity in the matcher.
   template<int Width>
   bool isSImm9OffsetFB() const {
-    return isSImm9() && !isUImm12Offset<Width / 8>();
+    return isSImm<9>() && !isUImm12Offset<Width / 8>();
   }
 
   bool isAdrpLabel() const {
@@ -1160,6 +1163,64 @@ public:
     return true;
   }
 
+  bool isSVECpyImm() const {
+    if (!isShiftedImm() && !isImm())
+      return false;
+
+    const MCExpr *Expr;
+    unsigned Shift;
+
+    // The Shift is either 'lsl #0' or 'lsl #8'.
+    if (isShiftedImm()) {
+      Shift = ShiftedImm.ShiftAmount;
+      Expr = ShiftedImm.Val;
+      if (Shift != 0 && Shift != 8)
+        return false;
+    } else {
+      Shift = 0;
+      Expr = getImm();
+    }
+
+    const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(Expr);
+    if (!CE)
+      return false;
+    return AArch64_AM::isSVECpyImm(CE->getValue() * (1 << Shift));
+  }
+
+  bool isSVECpyImmByte() const {
+    if (!isShiftedImm() && !isImm())
+      return false;
+
+    const MCExpr *Expr;
+    unsigned Shift;
+
+    // The Shift is either 'lsl #0' or 'lsl #8'.
+    if (isShiftedImm()) {
+      Shift = ShiftedImm.ShiftAmount;
+      Expr = ShiftedImm.Val;
+      if (Shift != 0)
+        return false;
+    } else {
+      Shift = 0;
+      Expr = getImm();
+    }
+
+    const MCConstantExpr *CE = dyn_cast<MCConstantExpr>(Expr);
+    if (!CE)
+      return false;
+    return AArch64_AM::isSVECpyImmByte(CE->getValue() * (1 << Shift));
+  }
+
+  bool isSVEFPImm8() const {
+    // k_FPImm accepts a single invalid encoding of +0.0
+    return Kind == k_FPImm && (getFPImm() != (unsigned)-1);
+  }
+
+  bool isSVEFPImmZero() const {
+    // k_FPImm accepts a single invalid encoding of +0.0
+    return Kind == k_FPImm && (getFPImm() == (unsigned)-1);
+  }
+
   void addExpr(MCInst &Inst, const MCExpr *Expr) const {
     // Add as immediates when possible.  Null MCExpr = 0.
     if (!Expr)
@@ -1182,6 +1243,18 @@ public:
 
     const MCRegisterInfo *RI = Ctx.getRegisterInfo();
     uint32_t Reg = RI->getRegClass(AArch64::GPR32RegClassID).getRegister(
+        RI->getEncodingValue(getReg()));
+
+    Inst.addOperand(MCOperand::createReg(Reg));
+  }
+
+  void addGPR64as32Operands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    assert(
+        AArch64MCRegisterClasses[AArch64::GPR32RegClassID].contains(getReg()));
+
+    const MCRegisterInfo *RI = Ctx.getRegisterInfo();
+    uint32_t Reg = RI->getRegClass(AArch64::GPR64RegClassID).getRegister(
         RI->getEncodingValue(getReg()));
 
     Inst.addOperand(MCOperand::createReg(Reg));
@@ -1232,27 +1305,7 @@ public:
         MCOperand::createReg(FirstReg + getVectorListStart() - AArch64::Q0));
   }
 
-  void addVectorIndex1Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    Inst.addOperand(MCOperand::createImm(getVectorIndex()));
-  }
-
-  void addVectorIndexBOperands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    Inst.addOperand(MCOperand::createImm(getVectorIndex()));
-  }
-
-  void addVectorIndexHOperands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    Inst.addOperand(MCOperand::createImm(getVectorIndex()));
-  }
-
-  void addVectorIndexSOperands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    Inst.addOperand(MCOperand::createImm(getVectorIndex()));
-  }
-
-  void addVectorIndexDOperands(MCInst &Inst, unsigned N) const {
+  void addVectorIndex(MCInst &Inst, unsigned N) const {
     assert(N == 1 && "Invalid number of operands!");
     Inst.addOperand(MCOperand::createImm(getVectorIndex()));
   }
@@ -1265,15 +1318,25 @@ public:
     addExpr(Inst, getImm());
   }
 
+  template<int Shift>
   void addAddSubImmOperands(MCInst &Inst, unsigned N) const {
     assert(N == 2 && "Invalid number of operands!");
+
     if (isShiftedImm()) {
       addExpr(Inst, getShiftedImmVal());
       Inst.addOperand(MCOperand::createImm(getShiftedImmShift()));
-    } else {
-      addExpr(Inst, getImm());
-      Inst.addOperand(MCOperand::createImm(0));
+      return;
+    } else if (auto *CE = dyn_cast<MCConstantExpr>(getImm())) {
+      int64_t Val = CE->getValue();
+      if ((Val != 0) && ((Val >> Shift) << Shift) == Val) {
+        Inst.addOperand(MCOperand::createImm(Val >> Shift));
+        Inst.addOperand(MCOperand::createImm(Shift));
+        return;
+      }
     }
+
+    addExpr(Inst, getImm());
+    Inst.addOperand(MCOperand::createImm(0));
   }
 
   void addAddSubImmNegOperands(MCInst &Inst, unsigned N) const {
@@ -1318,149 +1381,28 @@ public:
     Inst.addOperand(MCOperand::createImm(MCE->getValue() / Scale));
   }
 
-  void addSImm9Operands(MCInst &Inst, unsigned N) const {
+  template <int Scale>
+  void addImmScaledOperands(MCInst &Inst, unsigned N) const {
     assert(N == 1 && "Invalid number of operands!");
     const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
+    Inst.addOperand(MCOperand::createImm(MCE->getValue() / Scale));
   }
 
-  void addSImm7s4Operands(MCInst &Inst, unsigned N) const {
+  template <typename T>
+  void addLogicalImmOperands(MCInst &Inst, unsigned N) const {
     assert(N == 1 && "Invalid number of operands!");
     const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue() / 4));
-  }
-
-  void addSImm7s8Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue() / 8));
-  }
-
-  void addSImm7s16Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue() / 16));
-  }
-
-  void addImm0_1Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm0_7Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm1_8Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm0_15Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm1_16Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    assert(MCE && "Invalid constant immediate operand!");
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm0_31Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm1_31Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm1_32Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm0_63Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm1_63Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm1_64Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm0_127Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm0_255Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm0_65535Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addImm32_63Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    Inst.addOperand(MCOperand::createImm(MCE->getValue()));
-  }
-
-  void addLogicalImm32Operands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    uint64_t encoding =
-        AArch64_AM::encodeLogicalImmediate(MCE->getValue() & 0xFFFFFFFF, 32);
+    typename std::make_unsigned<T>::type Val = MCE->getValue();
+    uint64_t encoding = AArch64_AM::encodeLogicalImmediate(Val, sizeof(T) * 8);
     Inst.addOperand(MCOperand::createImm(encoding));
   }
 
-  void addLogicalImm64Operands(MCInst &Inst, unsigned N) const {
+  template <typename T>
+  void addLogicalImmNotOperands(MCInst &Inst, unsigned N) const {
     assert(N == 1 && "Invalid number of operands!");
     const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    uint64_t encoding = AArch64_AM::encodeLogicalImmediate(MCE->getValue(), 64);
-    Inst.addOperand(MCOperand::createImm(encoding));
-  }
-
-  void addLogicalImm32NotOperands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    int64_t Val = ~MCE->getValue() & 0xFFFFFFFF;
-    uint64_t encoding = AArch64_AM::encodeLogicalImmediate(Val, 32);
-    Inst.addOperand(MCOperand::createImm(encoding));
-  }
-
-  void addLogicalImm64NotOperands(MCInst &Inst, unsigned N) const {
-    assert(N == 1 && "Invalid number of operands!");
-    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
-    uint64_t encoding =
-        AArch64_AM::encodeLogicalImmediate(~MCE->getValue(), 64);
+    typename std::make_unsigned<T>::type Val = ~MCE->getValue();
+    uint64_t encoding = AArch64_AM::encodeLogicalImmediate(Val, sizeof(T) * 8);
     Inst.addOperand(MCOperand::createImm(encoding));
   }
 
@@ -1562,6 +1504,31 @@ public:
     Inst.addOperand(MCOperand::createImm(getPSBHint()));
   }
 
+  void addSVEPrefetchOperands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    Inst.addOperand(MCOperand::createImm(getPrefetch()));
+  }
+
+  void addSVEShiftOperands(MCInst &Inst, unsigned N) const {
+    unsigned int Imm = getShiftExtendAmount();
+    Inst.addOperand(MCOperand::createImm(Imm));
+  }
+
+  void addSVEExtendOperands(MCInst &Inst, unsigned N) const {
+    unsigned int Imm = getShiftExtendAmount();
+    AArch64_AM::ShiftExtendType ET = getShiftExtendType();
+    if (ET == AArch64_AM::SXTW)
+      Imm |= 0x80;
+    Inst.addOperand(MCOperand::createImm(Imm));
+  }
+
+  // SVE #0.0 is represented as "DUP_ZI Zd, #0 lsl 0"
+  void addSVEFPImmZeroOperands(MCInst &Inst, unsigned N) const {
+    assert(N == 2 && "Invalid number of operands!");
+    Inst.addOperand(MCOperand::createImm(0));
+    Inst.addOperand(MCOperand::createImm(0));
+  }
+
   void addShifterOperands(MCInst &Inst, unsigned N) const {
     assert(N == 1 && "Invalid number of operands!");
     unsigned Imm =
@@ -1623,6 +1590,38 @@ public:
     Inst.addOperand(MCOperand::createImm((~Value >> Shift) & 0xffff));
   }
 
+  void addSVEPatternOperands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    auto Imm = dyn_cast<MCConstantExpr>(getImm());
+    assert (Imm != NULL);
+    Inst.addOperand(MCOperand::createImm(Imm->getValue()));
+  }
+
+  void addFPR8asZPRRegOperands(MCInst &Inst, unsigned N) const {
+    Inst.addOperand(MCOperand::createReg(AArch64::Z0 + getReg() - AArch64::B0));
+  }
+  void addFPR16asZPRRegOperands(MCInst &Inst, unsigned N) const {
+    Inst.addOperand(MCOperand::createReg(AArch64::Z0 + getReg() - AArch64::H0));
+  }
+  void addFPR32asZPRRegOperands(MCInst &Inst, unsigned N) const {
+    Inst.addOperand(MCOperand::createReg(AArch64::Z0 + getReg() - AArch64::S0));
+  }
+  void addFPR64asZPRRegOperands(MCInst &Inst, unsigned N) const {
+    Inst.addOperand(MCOperand::createReg(AArch64::Z0 + getReg() - AArch64::D0));
+  }
+
+  template <int NumRegs>
+  void addSVEVectorListOperands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    static const unsigned FirstRegs[] = { AArch64::Z0,
+                                          AArch64::Z0_Z1,
+                                          AArch64::Z0_Z1_Z2,
+                                          AArch64::Z0_Z1_Z2_Z3 };
+    unsigned FirstReg = FirstRegs[NumRegs - 1];
+    Inst.addOperand(
+        MCOperand::createReg(FirstReg + getVectorListStart() - AArch64::Z0));
+  }
+
   void print(raw_ostream &OS) const override;
 
   static std::unique_ptr<AArch64Operand>
@@ -1637,10 +1636,10 @@ public:
   }
 
   static std::unique_ptr<AArch64Operand>
-  CreateReg(unsigned RegNum, bool isVector, SMLoc S, SMLoc E, MCContext &Ctx) {
+  CreateReg(unsigned RegNum, RegKind Kind, SMLoc S, SMLoc E, MCContext &Ctx) {
     auto Op = make_unique<AArch64Operand>(k_Register, Ctx);
     Op->Reg.RegNum = RegNum;
-    Op->Reg.isVector = isVector;
+    Op->Reg.Kind = Kind;
     Op->StartLoc = S;
     Op->EndLoc = E;
     return Op;
@@ -1648,12 +1647,14 @@ public:
 
   static std::unique_ptr<AArch64Operand>
   CreateVectorList(unsigned RegNum, unsigned Count, unsigned NumElements,
-                   char ElementKind, SMLoc S, SMLoc E, MCContext &Ctx) {
+                   char ElementKind, bool IsSVE, SMLoc S, SMLoc E,
+                   MCContext &Ctx) {
     auto Op = make_unique<AArch64Operand>(k_VectorList, Ctx);
     Op->VectorList.RegNum = RegNum;
     Op->VectorList.Count = Count;
     Op->VectorList.NumElements = NumElements;
     Op->VectorList.ElementKind = ElementKind;
+    Op->VectorList.IsSVE = IsSVE;
     Op->StartLoc = S;
     Op->EndLoc = E;
     return Op;
@@ -1926,6 +1927,77 @@ static bool isValidVectorKind(StringRef Name) {
       .Default(false);
 }
 
+static unsigned matchSVEVectorRegName(StringRef Name) {
+  return StringSwitch<unsigned>(Name.lower())
+      .Case("z0", AArch64::Z0)
+      .Case("z1", AArch64::Z1)
+      .Case("z2", AArch64::Z2)
+      .Case("z3", AArch64::Z3)
+      .Case("z4", AArch64::Z4)
+      .Case("z5", AArch64::Z5)
+      .Case("z6", AArch64::Z6)
+      .Case("z7", AArch64::Z7)
+      .Case("z8", AArch64::Z8)
+      .Case("z9", AArch64::Z9)
+      .Case("z10", AArch64::Z10)
+      .Case("z11", AArch64::Z11)
+      .Case("z12", AArch64::Z12)
+      .Case("z13", AArch64::Z13)
+      .Case("z14", AArch64::Z14)
+      .Case("z15", AArch64::Z15)
+      .Case("z16", AArch64::Z16)
+      .Case("z17", AArch64::Z17)
+      .Case("z18", AArch64::Z18)
+      .Case("z19", AArch64::Z19)
+      .Case("z20", AArch64::Z20)
+      .Case("z21", AArch64::Z21)
+      .Case("z22", AArch64::Z22)
+      .Case("z23", AArch64::Z23)
+      .Case("z24", AArch64::Z24)
+      .Case("z25", AArch64::Z25)
+      .Case("z26", AArch64::Z26)
+      .Case("z27", AArch64::Z27)
+      .Case("z28", AArch64::Z28)
+      .Case("z29", AArch64::Z29)
+      .Case("z30", AArch64::Z30)
+      .Case("z31", AArch64::Z31)
+      .Default(0);
+}
+
+static unsigned matchSVEPredicateRegName(StringRef Name) {
+  return StringSwitch<unsigned>(Name.lower())
+      .Case("p0", AArch64::P0)
+      .Case("p1", AArch64::P1)
+      .Case("p2", AArch64::P2)
+      .Case("p3", AArch64::P3)
+      .Case("p4", AArch64::P4)
+      .Case("p5", AArch64::P5)
+      .Case("p6", AArch64::P6)
+      .Case("p7", AArch64::P7)
+      .Case("p8", AArch64::P8)
+      .Case("p9", AArch64::P9)
+      .Case("p10", AArch64::P10)
+      .Case("p11", AArch64::P11)
+      .Case("p12", AArch64::P12)
+      .Case("p13", AArch64::P13)
+      .Case("p14", AArch64::P14)
+      .Case("p15", AArch64::P15)
+      .Default(0);
+}
+
+static bool isValidSVEKind(StringRef Name) {
+  return StringSwitch<bool>(Name.lower())
+      .Case(".b", true)
+      .Case(".h", true)
+      .Case(".s", true)
+      .Case(".d", true)
+      .Default(false);
+}
+
+static bool isSVEVectorOrPredicateRegister(std::string Name) {
+  return Name[0] == 'z' || Name[0] == 'p';
+}
+
 static void parseValidVectorKind(StringRef Name, unsigned &NumElements,
                                  char &ElementKind) {
   assert(isValidVectorKind(Name));
@@ -1952,23 +2024,49 @@ bool AArch64AsmParser::ParseRegister(unsigned &RegNo, SMLoc &StartLoc,
   return (RegNo == (unsigned)-1);
 }
 
+unsigned AArch64AsmParser::matchReqRegisterNameAlias(StringRef Name,
+                                                     RegKind Kind) {
+  // Check for aliases registered via .req. Canonicalize to lower case.
+  // That's more consistent since register names are case insensitive, and
+  // it's how the original entry was passed in from MC/MCParser/AsmParser.
+  auto Entry = RegisterReqs.find(Name.lower());
+  if (Entry == RegisterReqs.end())
+    return 0;
+  // set RegNum if the match is the right kind of register
+  if (Kind == Entry->getValue().first)
+    return Entry->getValue().second;
+  return 0;
+}
+
 // Matches a register name or register alias previously defined by '.req'
 unsigned AArch64AsmParser::matchRegisterNameAlias(StringRef Name,
                                                   bool isVector) {
   unsigned RegNum = isVector ? matchVectorRegName(Name)
                              : MatchRegisterName(Name);
+  RegKind Kind = isVector ? RegKind::NeonVector : RegKind::Scalar;
 
-  if (RegNum == 0) {
-    // Check for aliases registered via .req. Canonicalize to lower case.
-    // That's more consistent since register names are case insensitive, and
-    // it's how the original entry was passed in from MC/MCParser/AsmParser.
-    auto Entry = RegisterReqs.find(Name.lower());
-    if (Entry == RegisterReqs.end())
-      return 0;
-    // set RegNum if the match is the right kind of register
-    if (isVector == Entry->getValue().first)
-      RegNum = Entry->getValue().second;
-  }
+  if (RegNum == 0)
+    RegNum = matchReqRegisterNameAlias (Name, Kind);
+  return RegNum;
+}
+
+// Matches a SVE vector register name or register alias previously defined by
+// '.req'
+unsigned AArch64AsmParser::matchSVEPredicateNameAlias(StringRef Name) {
+  unsigned RegNum = matchSVEPredicateRegName(Name);
+
+  if (RegNum == 0)
+    RegNum = matchReqRegisterNameAlias (Name, RegKind::SVEPredicate);
+  return RegNum;
+}
+
+// Matches a SVE predicate register name or register alias previously defined
+// by '.req'
+unsigned AArch64AsmParser::matchSVEVectorNameAlias(StringRef Name) {
+  unsigned RegNum = matchSVEVectorRegName(Name);
+
+  if (RegNum == 0)
+    RegNum = matchReqRegisterNameAlias (Name, RegKind::SVEVector);
   return RegNum;
 }
 
@@ -1981,7 +2079,13 @@ int AArch64AsmParser::tryParseRegister() {
   assert(Tok.is(AsmToken::Identifier) && "Token is not an Identifier");
 
   std::string lowerCase = Tok.getString().lower();
+  // TODO: Is this really the right way, or should we make z0,1,2,etc not real
+  // registers in the same way as it's done for neon?
+  if (isSVEVectorOrPredicateRegister(lowerCase))
+    return -1;
+
   unsigned RegNum = matchRegisterNameAlias(lowerCase, false);
+
   // Also handle a few aliases of registers.
   if (RegNum == 0)
     RegNum = StringSwitch<unsigned>(lowerCase)
@@ -2062,6 +2166,7 @@ AArch64AsmParser::tryParseSysCROperand(OperandVector &Operands) {
 }
 
 /// tryParsePrefetch - Try to parse a prefetch operand.
+template<class MapperClass, int MaxID>
 AArch64AsmParser::OperandMatchResultTy
 AArch64AsmParser::tryParsePrefetch(OperandVector &Operands) {
   MCAsmParser &Parser = getParser();
@@ -2082,15 +2187,14 @@ AArch64AsmParser::tryParsePrefetch(OperandVector &Operands) {
       return MatchOperand_ParseFail;
     }
     unsigned prfop = MCE->getValue();
-    if (prfop > 31) {
-      TokError("prefetch operand out of range, [0,31] expected");
+    if (prfop > MaxID) {
+      TokError("prefetch operand out of range, [0," + Twine(MaxID) + "] expected");
       return MatchOperand_ParseFail;
     }
 
     bool Valid;
-    auto Mapper = AArch64PRFM::PRFMMapper();
     StringRef Name = 
-        Mapper.toString(MCE->getValue(), getSTI().getFeatureBits(), Valid);
+        MapperClass().toString(MCE->getValue(), getSTI().getFeatureBits(), Valid);
     Operands.push_back(AArch64Operand::CreatePrefetch(prfop, Name,
                                                       S, getContext()));
     return MatchOperand_Success;
@@ -2102,9 +2206,8 @@ AArch64AsmParser::tryParsePrefetch(OperandVector &Operands) {
   }
 
   bool Valid;
-  auto Mapper = AArch64PRFM::PRFMMapper();
   unsigned prfop = 
-      Mapper.fromString(Tok.getString(), getSTI().getFeatureBits(), Valid);
+      MapperClass().fromString(Tok.getString(), getSTI().getFeatureBits(), Valid);
   if (!Valid) {
     TokError("pre-fetch hint expected");
     return MatchOperand_ParseFail;
@@ -2294,18 +2397,8 @@ AArch64AsmParser::tryParseAddSubImm(OperandVector &Operands) {
   if (parseSymbolicImmVal(Imm))
     return MatchOperand_ParseFail;
   else if (Parser.getTok().isNot(AsmToken::Comma)) {
-    uint64_t ShiftAmount = 0;
-    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(Imm);
-    if (MCE) {
-      int64_t Val = MCE->getValue();
-      if (Val > 0xfff && (Val & 0xfff) == 0) {
-        Imm = MCConstantExpr::create(Val >> 12, getContext());
-        ShiftAmount = 12;
-      }
-    }
     SMLoc E = Parser.getTok().getLoc();
-    Operands.push_back(AArch64Operand::CreateShiftedImm(Imm, ShiftAmount, S, E,
-                                                        getContext()));
+    Operands.push_back(AArch64Operand::CreateImm(Imm, S, E, getContext()));
     return MatchOperand_Success;
   }
 
@@ -2348,24 +2441,34 @@ AArch64AsmParser::tryParseAddSubImm(OperandVector &Operands) {
 /// parseCondCodeString - Parse a Condition Code string.
 AArch64CC::CondCode AArch64AsmParser::parseCondCodeString(StringRef Cond) {
   AArch64CC::CondCode CC = StringSwitch<AArch64CC::CondCode>(Cond.lower())
-                    .Case("eq", AArch64CC::EQ)
-                    .Case("ne", AArch64CC::NE)
-                    .Case("cs", AArch64CC::HS)
-                    .Case("hs", AArch64CC::HS)
-                    .Case("cc", AArch64CC::LO)
-                    .Case("lo", AArch64CC::LO)
-                    .Case("mi", AArch64CC::MI)
-                    .Case("pl", AArch64CC::PL)
-                    .Case("vs", AArch64CC::VS)
-                    .Case("vc", AArch64CC::VC)
-                    .Case("hi", AArch64CC::HI)
-                    .Case("ls", AArch64CC::LS)
-                    .Case("ge", AArch64CC::GE)
-                    .Case("lt", AArch64CC::LT)
-                    .Case("gt", AArch64CC::GT)
-                    .Case("le", AArch64CC::LE)
-                    .Case("al", AArch64CC::AL)
-                    .Case("nv", AArch64CC::NV)
+                    .Case("eq",    AArch64CC::EQ)
+                    .Case("none",  AArch64CC::EQ)
+                    .Case("ne",    AArch64CC::NE)
+                    .Case("any",   AArch64CC::NE)
+                    .Case("cs",    AArch64CC::HS)
+                    .Case("hs",    AArch64CC::HS)
+                    .Case("nlast", AArch64CC::HS)
+                    .Case("cc",    AArch64CC::LO)
+                    .Case("lo",    AArch64CC::LO)
+                    .Case("last",  AArch64CC::LO)
+                    .Case("mi",    AArch64CC::MI)
+                    .Case("first", AArch64CC::MI)
+                    .Case("pl",    AArch64CC::PL)
+                    .Case("nfrst", AArch64CC::PL)
+                    .Case("vs",    AArch64CC::VS)
+                    .Case("vc",    AArch64CC::VC)
+                    .Case("hi",    AArch64CC::HI)
+                    .Case("pmore", AArch64CC::HI)
+                    .Case("ls",    AArch64CC::LS)
+                    .Case("plast", AArch64CC::LS)
+                    .Case("ge",    AArch64CC::GE)
+                    .Case("tcont", AArch64CC::GE)
+                    .Case("lt",    AArch64CC::LT)
+                    .Case("tstop", AArch64CC::LT)
+                    .Case("gt",    AArch64CC::GT)
+                    .Case("le",    AArch64CC::LE)
+                    .Case("al",    AArch64CC::AL)
+                    .Case("nv",    AArch64CC::NV)
                     .Default(AArch64CC::Invalid);
   return CC;
 }
@@ -2833,20 +2936,138 @@ AArch64AsmParser::tryParseSysReg(OperandVector &Operands) {
   return MatchOperand_Success;
 }
 
+// tryMatchSVEPredicateRegister - Try to parse a vector register name with an
+// optional kind specifier. If it is a register specifier, eat the token and
+// return it.
+int AArch64AsmParser::tryMatchSVEPredicateRegister(StringRef &Kind) {
+  MCAsmParser &Parser = getParser();
+  const AsmToken &Tok = Parser.getTok();
+
+  if (Tok.isNot(AsmToken::Identifier)) {
+    TokError("sve predicate register expected");
+    return -1;
+  }
+
+  StringRef Name = Tok.getString();
+  // If there is a kind specifier, it's separated from the register name by
+  // a '.'.
+  size_t Start = 0, Next = Name.find('.');
+  StringRef Head = Name.slice(Start, Next);
+  unsigned RegNum = matchSVEPredicateNameAlias(Head);
+  if (RegNum) {
+    if (Next != StringRef::npos) {
+      Kind = Name.slice(Next, StringRef::npos);
+      if (!isValidSVEKind(Kind)) {
+        TokError("invalid sve predicate kind qualifier");
+        return -1;
+      }
+    }
+    Parser.Lex(); // Eat the register token.
+    return RegNum;
+  }
+
+  return -1;
+}
+
+// tryMatchSVEVectorRegister - Try to parse a SVE vector register name with
+// optional kind specifier. If it is a register specifier, eat the token
+// and return it.
+int AArch64AsmParser::tryMatchSVEVectorRegister(const AsmToken &Tok,
+                                                StringRef &Kind,
+                                                bool Expected) {
+  if (Tok.isNot(AsmToken::Identifier)) {
+    if (Expected)
+      TokError("sve vector register expected");
+    return -1;
+  }
+
+  StringRef Name = Tok.getString();
+  // If there is a kind specifier, it's separated from the register name by
+  // a '.'.
+  size_t Start = 0, Next = Name.find('.');
+  StringRef Head = Name.slice(Start, Next);
+  unsigned RegNum = matchSVEVectorNameAlias(Head);
+
+  if (RegNum) {
+    if (Next != StringRef::npos) {
+      Kind = Name.slice(Next, StringRef::npos);
+      if (!isValidSVEKind(Kind)) {
+        if (Expected)
+          TokError("invalid sve vector kind qualifier");
+        return -1;
+      }
+    }
+    return RegNum;
+  }
+
+  return -1;
+}
+
+/// tryParseSVEPredicate - Parse a SVE predicate register operand.
+bool AArch64AsmParser::tryParseSVEPredicate(OperandVector &Operands) {
+  MCAsmParser &Parser = getParser();
+
+  // Check for a SVE predicate register specifier first.
+  const SMLoc S = getLoc();
+  StringRef Kind;
+  int RegNum = tryMatchSVEPredicateRegister(Kind);
+  if (RegNum == -1)
+    return true;
+
+  Operands.push_back(AArch64Operand::CreateReg(RegNum, RegKind::SVEPredicate,
+    S, getLoc(), getContext()));
+
+  // Not all predicates are followed by a '/'.
+  const SMLoc SS = getLoc ();
+  if(Parser.getTok().isNot(AsmToken::Slash)) {
+    if (!Kind.empty())
+      Operands.push_back(
+        AArch64Operand::CreateToken(Kind, false, S, getContext()));
+    return false;
+  }
+  Parser.Lex(); // Eat the slash.
+
+  // Add slash
+  Operands.push_back(AArch64Operand::CreateToken("/" , false, SS, getContext()));
+
+  // Zeroing or merging?
+  const SMLoc SSS = getLoc();
+  StringRef Pred = Parser.getTok().getString();
+  bool zeroing = false;
+  if (Pred.equals_lower("z"))
+    zeroing = true;
+  else if (!Pred.equals_lower("m")) {
+    Error(SSS,"expecting 'm' or 'z' predication");
+    return false;
+  }
+  Parser.Lex(); // Eat zero/merge token.
+
+  // Add zero/merge token.
+  const char *zm = zeroing ? "z" : "m";
+  Operands.push_back(AArch64Operand::CreateToken(zm, false, SSS, getContext()));
+  return false;
+}
+
 /// tryParseVectorRegister - Parse a vector register operand.
 bool AArch64AsmParser::tryParseVectorRegister(OperandVector &Operands) {
   MCAsmParser &Parser = getParser();
   if (Parser.getTok().isNot(AsmToken::Identifier))
     return true;
 
+  RegKind RegisterKind = RegKind::NeonVector;
   SMLoc S = getLoc();
   // Check for a vector register specifier first.
   StringRef Kind;
   int64_t Reg = tryMatchVectorRegister(Kind, false);
-  if (Reg == -1)
-    return true;
+  if (Reg == -1) {
+    Reg = tryMatchSVEVectorRegister(Parser.getTok(), Kind, false);
+    if (Reg == -1)
+      return true;
+    Parser.Lex();
+    RegisterKind = RegKind::SVEVector;
+  }
   Operands.push_back(
-      AArch64Operand::CreateReg(Reg, true, S, getLoc(), getContext()));
+      AArch64Operand::CreateReg(Reg, RegisterKind, S, getLoc(), getContext()));
   // If there was an explicit qualifier, that goes on as a literal text
   // operand.
   if (!Kind.empty())
@@ -2886,16 +3107,19 @@ bool AArch64AsmParser::tryParseVectorRegister(OperandVector &Operands) {
 bool AArch64AsmParser::parseRegister(OperandVector &Operands) {
   MCAsmParser &Parser = getParser();
   SMLoc S = getLoc();
-  // Try for a vector register.
+  // Try for a vector (neon or sve) register.
   if (!tryParseVectorRegister(Operands))
+    return false;
+  // Try for a sve predicate register.
+  if (!tryParseSVEPredicate(Operands))
     return false;
 
   // Try for a scalar register.
   int64_t Reg = tryParseRegister();
   if (Reg == -1)
     return true;
-  Operands.push_back(
-      AArch64Operand::CreateReg(Reg, false, S, getLoc(), getContext()));
+  Operands.push_back(AArch64Operand::CreateReg(Reg, RegKind::Scalar, S,
+      getLoc(), getContext()));
 
   // A small number of instructions (FMOVXDhighr, for example) have "[1]"
   // as a string token in the instruction itself.
@@ -3073,7 +3297,8 @@ bool AArch64AsmParser::parseVectorList(OperandVector &Operands) {
     parseValidVectorKind(Kind, NumElements, ElementKind);
 
   Operands.push_back(AArch64Operand::CreateVectorList(
-      FirstReg, Count, NumElements, ElementKind, S, getLoc(), getContext()));
+      FirstReg, Count, NumElements, ElementKind, false, S, getLoc(),
+      getContext()));
 
   // If there is an index specifier following the list, parse that too.
   if (Parser.getTok().is(AsmToken::LBrac)) {
@@ -3122,7 +3347,7 @@ AArch64AsmParser::tryParseGPR64sp0Operand(OperandVector &Operands) {
 
   if (Parser.getTok().isNot(AsmToken::Comma)) {
     Operands.push_back(
-        AArch64Operand::CreateReg(RegNum, false, S, getLoc(), Ctx));
+        AArch64Operand::CreateReg(RegNum, RegKind::Scalar, S, getLoc(), Ctx));
     return MatchOperand_Success;
   }
   Parser.Lex(); // Eat comma.
@@ -3143,14 +3368,37 @@ AArch64AsmParser::tryParseGPR64sp0Operand(OperandVector &Operands) {
   }
 
   Operands.push_back(
-      AArch64Operand::CreateReg(RegNum, false, S, getLoc(), Ctx));
+      AArch64Operand::CreateReg(RegNum, RegKind::Scalar, S, getLoc(), Ctx));
   return MatchOperand_Success;
+}
+
+bool AArch64AsmParser::parseOptionalMulVl(OperandVector &Operands) {
+  MCAsmParser &Parser = getParser();
+
+  // Some SVE instructions have a decoration after the immediate, i.e.
+  // "mul vl". We parse them here and add tokens, which must be present in the
+  // asm string in the tablegen instruction.
+  if (!Parser.getTok().getString().equals_lower("mul") ||
+      !Parser.getLexer().peekTok().getString().equals_lower("vl"))
+    return true;
+
+  SMLoc S = getLoc();
+  Operands.push_back(
+    AArch64Operand::CreateToken("mul", false, S, getContext()));
+  Parser.Lex(); // Eat the "mul"
+
+  S = getLoc();
+  Operands.push_back(
+    AArch64Operand::CreateToken("vl", false, S, getContext()));
+  Parser.Lex(); // Eat the "vl"
+
+  return false;
 }
 
 /// parseOperand - Parse a arm instruction operand.  For now this parses the
 /// operand regardless of the mnemonic.
 bool AArch64AsmParser::parseOperand(OperandVector &Operands, bool isCondCode,
-                                  bool invertCondCode) {
+                                    bool invertCondCode) {
   MCAsmParser &Parser = getParser();
   // Check if the current operand has a custom associated parser, if so, try to
   // custom parse the operand, or fallback to the general approach.
@@ -3197,6 +3445,16 @@ bool AArch64AsmParser::parseOperand(OperandVector &Operands, bool isCondCode,
     if (!parseRegister(Operands))
       return false;
 
+    // See if this is a "mul vl" decoration used by SVE instructions.
+    if (!parseOptionalMulVl(Operands))
+      return false;
+
+    // If it's an immediate multiply by 1-16 we will have a 'mul' to
+    // take care of. We do this here instead of just allowing a custom
+    // operand to handle it because the 'mul' will disappear if we don't.
+    if (tryParseMulImm4(Operands) == MatchOperand_Success)
+      return false;
+
     // This could be an optional "shift" or "extend" operand.
     OperandMatchResultTy GotShift = tryParseOptionalShiftExtend(Operands);
     // We can only continue if no tokens were eaten.
@@ -3241,7 +3499,7 @@ bool AArch64AsmParser::parseOperand(OperandVector &Operands, bool isCondCode,
       uint64_t IntVal = RealVal.bitcastToAPInt().getZExtValue();
       if (Mnemonic != "fcmp" && Mnemonic != "fcmpe" && Mnemonic != "fcmeq" &&
           Mnemonic != "fcmge" && Mnemonic != "fcmgt" && Mnemonic != "fcmle" &&
-          Mnemonic != "fcmlt")
+          Mnemonic != "fcmlt" && Mnemonic != "fcmne")
         return TokError("unexpected floating point literal");
       else if (IntVal != 0 || isNegative)
         return TokError("expected floating-point constant #0.0");
@@ -3660,8 +3918,19 @@ bool AArch64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
   case Match_AddSubSecondSource:
     return Error(Loc,
       "expected compatible register, symbol or integer in range [0, 4095]");
+  case Match_AddSubImm8Operand:
+    return Error(Loc, "immediate must be an integer in range [0, 255] or a "
+                      "multiple of 256 in range [256, 65280]");
+  case Match_DupCpyByteImm8Operand:
+    return Error(Loc, "immediate must be an integer in range [-128, 255]"
+                      " with a shift amount of 0");
+  case Match_DupCpyImm8Operand:
+    return Error(Loc, "immediate must be an integer in range [-128, 127] or a "
+                      "multiple of 256 in range [-32768, 32512]");
   case Match_LogicalSecondSource:
     return Error(Loc, "expected compatible register or logical immediate");
+  case Match_InvalidSVEShiftExtend:
+    return Error(Loc, "expected 'lsl', 'sxtw' or 'uxtw'");
   case Match_InvalidMovImm32Shift:
     return Error(Loc, "expected 'lsl' with optional integer 0 or 16");
   case Match_InvalidMovImm64Shift:
@@ -3676,7 +3945,26 @@ bool AArch64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
     return Error(Loc,
                  "expected compatible register or floating-point constant");
   case Match_InvalidMemoryIndexedSImm9:
+  case Match_InvalidMemoryIndexed1SImm9:
     return Error(Loc, "index must be an integer in range [-256, 255].");
+  case Match_InvalidMemoryIndexedSImm8:
+    return Error(Loc, "index must be an integer in range [-128, 127].");
+  case Match_InvalidMemoryIndexedSImm7:
+    return Error(Loc, "index must be an integer in range [-64, 63].");
+  case Match_InvalidMemoryIndexedSImm6:
+  case Match_InvalidMemoryIndexed1SImm6:
+    return Error(Loc, "index must be an integer in range [-32, 31].");
+  case Match_InvalidMemoryIndexedSImm5:
+    return Error(Loc, "index must be an integer in range [-16, 15].");
+  case Match_InvalidMemoryIndexedSImm4:
+  case Match_InvalidMemoryIndexed1SImm4:
+    return Error(Loc, "index must be an integer in range [-8, 7].");
+  case Match_InvalidMemoryIndexed2SImm4:
+    return Error(Loc, "index must be a multiple of 2 in range [-16, 14].");
+  case Match_InvalidMemoryIndexed3SImm4:
+    return Error(Loc, "index must be a multiple of 3 in range [-24, 21].");
+  case Match_InvalidMemoryIndexed4SImm4:
+    return Error(Loc, "index must be a multiple of 4 in range [-32, 28].");
   case Match_InvalidMemoryIndexed4SImm7:
     return Error(Loc, "index must be a multiple of 4 in range [-256, 252].");
   case Match_InvalidMemoryIndexed8SImm7:
@@ -3723,6 +4011,20 @@ bool AArch64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
     return Error(Loc, "index must be a multiple of 8 in range [0, 32760].");
   case Match_InvalidMemoryIndexed16:
     return Error(Loc, "index must be a multiple of 16 in range [0, 65520].");
+  case Match_InvalidMemoryIndexed8UImm5:
+    return Error(Loc, "index must be a multiple of 8 in range [0, 248].");
+  case Match_InvalidMemoryIndexed4UImm5:
+    return Error(Loc, "index must be a multiple of 4 in range [0, 124].");
+  case Match_InvalidMemoryIndexed2UImm5:
+    return Error(Loc, "index must be a multiple of 2 in range [0, 62].");
+  case Match_InvalidMemoryIndexed8UImm6:
+    return Error(Loc, "index must be a multiple of 8 in range [0, 504].");
+  case Match_InvalidMemoryIndexed4UImm6:
+    return Error(Loc, "index must be a multiple of 4 in range [0, 252].");
+  case Match_InvalidMemoryIndexed2UImm6:
+    return Error(Loc, "index must be a multiple of 2 in range [0, 126].");
+  case Match_InvalidMemoryIndexed1UImm6:
+    return Error(Loc, "index must be in range [0, 63].");
   case Match_InvalidImm0_1:
     return Error(Loc, "immediate must be an integer in range [0, 1].");
   case Match_InvalidImm0_7:
@@ -3735,6 +4037,8 @@ bool AArch64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
     return Error(Loc, "immediate must be an integer in range [0, 63].");
   case Match_InvalidImm0_127:
     return Error(Loc, "immediate must be an integer in range [0, 127].");
+  case Match_InvalidImm0_255:
+    return Error(Loc, "immediate must be an integer in range [0, 255].");
   case Match_InvalidImm0_65535:
     return Error(Loc, "immediate must be an integer in range [0, 65535].");
   case Match_InvalidImm1_8:
@@ -3755,6 +4059,14 @@ bool AArch64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
     return Error(Loc, "vector lane must be an integer in range [0, 3].");
   case Match_InvalidIndexD:
     return Error(Loc, "vector lane must be an integer in range [0, 1].");
+  case Match_InvalidSVEVectorIndexB:
+    return Error(Loc, "vector lane must be an integer in range [0, 63].");
+  case Match_InvalidSVEVectorIndexH:
+    return Error(Loc, "vector lane must be an integer in range [0, 31].");
+  case Match_InvalidSVEVectorIndexS:
+    return Error(Loc, "vector lane must be an integer in range [0, 15].");
+  case Match_InvalidSVEVectorIndexD:
+    return Error(Loc, "vector lane must be an integer in range [0, 7].");
   case Match_InvalidLabel:
     return Error(Loc, "expected label or encodable integer pc offset");
   case Match_MRS:
@@ -3856,8 +4168,8 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
         Operands[0] = AArch64Operand::CreateToken(
               "bfm", false, Op.getStartLoc(), getContext());
         Operands[2] = AArch64Operand::CreateReg(
-            RegWidth == 32 ? AArch64::WZR : AArch64::XZR, false, SMLoc(),
-            SMLoc(), getContext());
+            RegWidth == 32 ? AArch64::WZR : AArch64::XZR, RegKind::Scalar,
+            SMLoc(), SMLoc(), getContext());
         Operands[3] = AArch64Operand::CreateImm(
             ImmRExpr, LSBOp.getStartLoc(), LSBOp.getEndLoc(), getContext());
         Operands.emplace_back(
@@ -3993,8 +4305,9 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
     AArch64Operand &Op = static_cast<AArch64Operand &>(*Operands[2]);
     if (Op.isReg()) {
       unsigned Reg = getXRegFromWReg(Op.getReg());
-      Operands[2] = AArch64Operand::CreateReg(Reg, false, Op.getStartLoc(),
-                                              Op.getEndLoc(), getContext());
+      Operands[2] = AArch64Operand::CreateReg(Reg, RegKind::Scalar,
+                                              Op.getStartLoc(), Op.getEndLoc(),
+                                              getContext());
     }
   }
   // FIXME: Likewise for sxt[bh] with a Xd dst operand
@@ -4008,7 +4321,8 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
       AArch64Operand &Op = static_cast<AArch64Operand &>(*Operands[2]);
       if (Op.isReg()) {
         unsigned Reg = getXRegFromWReg(Op.getReg());
-        Operands[2] = AArch64Operand::CreateReg(Reg, false, Op.getStartLoc(),
+        Operands[2] = AArch64Operand::CreateReg(Reg, RegKind::Scalar,
+                                                Op.getStartLoc(),
                                                 Op.getEndLoc(), getContext());
       }
     }
@@ -4024,7 +4338,8 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
       AArch64Operand &Op = static_cast<AArch64Operand &>(*Operands[1]);
       if (Op.isReg()) {
         unsigned Reg = getWRegFromXReg(Op.getReg());
-        Operands[1] = AArch64Operand::CreateReg(Reg, false, Op.getStartLoc(),
+        Operands[1] = AArch64Operand::CreateReg(Reg, RegKind::Scalar,
+                                                Op.getStartLoc(),
                                                 Op.getEndLoc(), getContext());
       }
     }
@@ -4040,8 +4355,9 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
               RegOp.getReg())
               ? AArch64::WZR
               : AArch64::XZR;
-      Operands[2] = AArch64Operand::CreateReg(zreg, false, Op.getStartLoc(),
-                                              Op.getEndLoc(), getContext());
+      Operands[2] = AArch64Operand::CreateReg(zreg, RegKind::Scalar,
+                                              Op.getStartLoc(), Op.getEndLoc(),
+                                              getContext());
     }
   }
 
@@ -4133,11 +4449,15 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
   case Match_AddSubRegExtendSmall:
   case Match_AddSubRegExtendLarge:
   case Match_AddSubSecondSource:
+  case Match_AddSubImm8Operand:
+  case Match_DupCpyByteImm8Operand:
+  case Match_DupCpyImm8Operand:
   case Match_LogicalSecondSource:
   case Match_AddSubRegShift32:
   case Match_AddSubRegShift64:
   case Match_InvalidMovImm32Shift:
   case Match_InvalidMovImm64Shift:
+  case Match_InvalidSVEShiftExtend:
   case Match_InvalidFPImm:
   case Match_InvalidMemoryWExtend8:
   case Match_InvalidMemoryWExtend16:
@@ -4149,16 +4469,35 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
   case Match_InvalidMemoryXExtend32:
   case Match_InvalidMemoryXExtend64:
   case Match_InvalidMemoryXExtend128:
+  case Match_InvalidMemoryIndexed1SImm4:
+  case Match_InvalidMemoryIndexed2SImm4:
+  case Match_InvalidMemoryIndexed3SImm4:
+  case Match_InvalidMemoryIndexed4SImm4:
+  case Match_InvalidMemoryIndexed1SImm6:
   case Match_InvalidMemoryIndexed4SImm7:
   case Match_InvalidMemoryIndexed8SImm7:
   case Match_InvalidMemoryIndexed16SImm7:
+  case Match_InvalidMemoryIndexed1SImm9:
+  case Match_InvalidMemoryIndexedSImm4:
+  case Match_InvalidMemoryIndexedSImm5:
+  case Match_InvalidMemoryIndexedSImm6:
+  case Match_InvalidMemoryIndexedSImm7:
+  case Match_InvalidMemoryIndexedSImm8:
   case Match_InvalidMemoryIndexedSImm9:
+  case Match_InvalidMemoryIndexed8UImm5:
+  case Match_InvalidMemoryIndexed4UImm5:
+  case Match_InvalidMemoryIndexed2UImm5:
+  case Match_InvalidMemoryIndexed1UImm6:
+  case Match_InvalidMemoryIndexed2UImm6:
+  case Match_InvalidMemoryIndexed4UImm6:
+  case Match_InvalidMemoryIndexed8UImm6:
   case Match_InvalidImm0_1:
   case Match_InvalidImm0_7:
   case Match_InvalidImm0_15:
   case Match_InvalidImm0_31:
   case Match_InvalidImm0_63:
   case Match_InvalidImm0_127:
+  case Match_InvalidImm0_255:
   case Match_InvalidImm0_65535:
   case Match_InvalidImm1_8:
   case Match_InvalidImm1_16:
@@ -4169,6 +4508,10 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
   case Match_InvalidIndexH:
   case Match_InvalidIndexS:
   case Match_InvalidIndexD:
+  case Match_InvalidSVEVectorIndexB:
+  case Match_InvalidSVEVectorIndexS:
+  case Match_InvalidSVEVectorIndexH:
+  case Match_InvalidSVEVectorIndexD:
   case Match_InvalidLabel:
   case Match_MSR:
   case Match_MRS: {
@@ -4439,16 +4782,39 @@ bool AArch64AsmParser::parseDirectiveReq(StringRef Name, SMLoc L) {
   Parser.Lex(); // Eat the '.req' token.
   SMLoc SRegLoc = getLoc();
   unsigned RegNum = tryParseRegister();
-  bool IsVector = false;
+  RegKind RegisterKind = RegKind::Scalar;
 
   if (RegNum == static_cast<unsigned>(-1)) {
     StringRef Kind;
+    RegisterKind = RegKind::NeonVector;
     RegNum = tryMatchVectorRegister(Kind, false);
     if (!Kind.empty()) {
       Error(SRegLoc, "vector register without type specifier expected");
       return false;
     }
-    IsVector = true;
+  }
+
+  if (RegNum == static_cast<unsigned>(-1)) {
+    StringRef Kind;
+    RegisterKind = RegKind::SVEVector;
+    int RegNumTmp = tryMatchSVEVectorRegister(Parser.getTok(), Kind, false);
+    if (RegNumTmp != -1)
+      Parser.Lex();
+    RegNum = RegNumTmp;
+    if (!Kind.empty()) {
+      Error(SRegLoc, "sve vector register without type specifier expected");
+      return false;
+    }
+  }
+
+  if (RegNum == static_cast<unsigned>(-1)) {
+    StringRef Kind;
+    RegisterKind = RegKind::SVEPredicate;
+    RegNum = tryMatchSVEPredicateRegister(Kind);
+    if (!Kind.empty()) {
+      Error(SRegLoc, "sve predicate register without type specifier expected");
+      return false;
+    }
   }
 
   if (RegNum == static_cast<unsigned>(-1)) {
@@ -4466,7 +4832,7 @@ bool AArch64AsmParser::parseDirectiveReq(StringRef Name, SMLoc L) {
 
   Parser.Lex(); // Consume the EndOfStatement
 
-  auto pair = std::make_pair(IsVector, RegNum);
+  auto pair = std::make_pair(RegisterKind, RegNum);
   if (RegisterReqs.insert(std::make_pair(Name, pair)).first->second != pair)
     Warning(L, "ignoring redefinition of register alias '" + Name + "'");
 
@@ -4679,8 +5045,377 @@ AArch64AsmParser::tryParseGPRSeqPair(OperandVector &Operands) {
            &AArch64MCRegisterClasses[AArch64::WSeqPairsClassRegClassID]);
   }
 
-  Operands.push_back(AArch64Operand::CreateReg(Pair, false, S, getLoc(),
-      getContext()));
+  Operands.push_back(AArch64Operand::CreateReg(Pair, RegKind::Scalar, S,
+      getLoc(), getContext()));
+
+  return MatchOperand_Success;
+}
+
+static inline const char* getGPROffsetExtTypeName(StringRef Name) {
+  const char *res = StringSwitch<const char*>(Name.lower())
+      .Case("lsl", "lsl")
+      .Case("uxtw", "uxtw")
+      .Case("sxtw", "sxtw")
+      .Case("umul", "umul")
+      .Case("mul", "mul")
+      .Default(nullptr);
+  return res;
+}
+
+AArch64AsmParser::OperandMatchResultTy
+AArch64AsmParser::tryParseGPRWithOffset(OperandVector &Operands) {
+  MCAsmParser &Parser = getParser();
+  const AsmToken &Tok = Parser.getTok();
+
+  if (!Tok.is(AsmToken::Identifier))
+    return MatchOperand_NoMatch;
+  unsigned RegNum = matchRegisterNameAlias(Tok.getString().lower(), false);
+  if (RegNum == 0)
+    return MatchOperand_NoMatch;
+
+  SMLoc S = getLoc();
+
+  // Peek two tokens - to prevent creating a token stream of '[#42, mul vl]'
+  // when the original stream was '[x23, #42, mul vl]' and it did not match
+  // GPRWithOffset.
+  AsmToken Peek[3];
+  Parser.getLexer().peekTokens(Peek);
+
+  if (Peek[0].isNot(AsmToken::Comma)) {
+    return MatchOperand_NoMatch;
+  }
+
+  if (Peek[1].isNot(AsmToken::Identifier) ||
+      !getGPROffsetExtTypeName(Peek[1].getString())) {
+    return MatchOperand_NoMatch;
+  }
+
+  Parser.Lex(); // Eat register
+  Parser.Lex(); // Eat comma.
+
+  SMLoc SS = getLoc();
+  const AsmToken &TokE = Parser.getTok();
+  Operands.push_back(AArch64Operand::CreateReg(RegNum, RegKind::Scalar, S,
+    getLoc(), getContext()));
+
+  StringRef value = TokE.getString();
+  // this is just make sure that offset ext type name is lowercase
+  const char *extTypeName = getGPROffsetExtTypeName(value);
+  Operands.push_back(
+    AArch64Operand::CreateToken(extTypeName, false, SS, getContext()));
+  Parser.Lex();  // eat the lsl|uxtw|sxtw
+
+  SMLoc SSS = getLoc();
+  const AsmToken &TokH = Parser.getTok();
+  if (TokH.is(AsmToken::Hash)) {
+    Parser.Lex();
+
+    const AsmToken &TokI = Parser.getTok();
+    if (TokI.isNot(AsmToken::Integer)) {
+      Error(SSS,"Expected immediate with hash");
+      return MatchOperand_NoMatch;
+    }
+    StringRef number = TokI.getString();
+    const size_t length = 1 + number.size();
+    StringRef token(SSS.getPointer(), length);
+
+    Operands.push_back(
+      AArch64Operand::CreateToken(token, false, SSS, getContext()));
+    Parser.Lex();
+  }
+
+  return MatchOperand_Success;
+}
+
+AArch64AsmParser::OperandMatchResultTy
+AArch64AsmParser::tryParseSVEVectorWithOffset(OperandVector &Operands) {
+  MCAsmParser &Parser = getParser();
+
+  const SMLoc S = getLoc();
+  // Check for a SVE vector register specifier first.
+  StringRef Kind;
+  int RegNum = tryMatchSVEVectorRegister(Parser.getTok(), Kind, false);
+  if (RegNum == -1)
+    return MatchOperand_NoMatch;
+  Parser.Lex(); // Eat the SVE Register Token
+
+  // There should always be an explicit qualifier, that goes on as a literal
+  // text operand.
+  if (Kind.empty())
+    return MatchOperand_NoMatch;
+
+  // Add the register operand.
+  Operands.push_back(AArch64Operand::CreateReg(RegNum, RegKind::SVEVector, S,
+    getLoc(), getContext()));
+  // Add the kind specifier.
+  Operands.push_back(AArch64Operand::CreateToken(Kind, false, S, getContext()));
+
+  // TODO: There are two variants of certain gather loads, i.e.
+  //   ld1b    z12.d, p2/z, [x24, z9.d]
+  //      and
+  //   ld1b    z12.d, p2/z, [x24, z9.d, uxtw]
+  // The tablegen file has both encodings as different instructions, where in
+  // the first its a normal ZPR operand, and the second its a ZPR offset
+  // operand. While parsing up to the z9.d either instruction is valid and
+  // so the parser may treat "z9.d" as an offset ZPR even in the first case.
+  if (Parser.getTok().isNot(AsmToken::Comma)) {
+    return MatchOperand_Success;
+  }
+  Parser.Lex(); // Eat comma.
+
+  SMLoc SS = getLoc();
+  const AsmToken &TokE = Parser.getTok();
+  if (TokE.isNot(AsmToken::Identifier)) {
+    return MatchOperand_NoMatch;
+  }
+
+  StringRef value = TokE.getString();
+  // this is just make sure that offset ext type name is lowercase
+  const char *extTypeName = getGPROffsetExtTypeName(value);
+  if (!extTypeName)
+    return MatchOperand_NoMatch;
+
+  Operands.push_back(
+    AArch64Operand::CreateToken(extTypeName, false, SS, getContext()));
+  Parser.Lex();  // eat the lsl|uxtw|sxtw
+
+  SMLoc SSS = getLoc();
+  const AsmToken &TokH = Parser.getTok();
+  if (TokH.is(AsmToken::RBrac))
+    return MatchOperand_Success;
+
+  if (TokH.is(AsmToken::Hash))
+    Parser.Lex();
+
+  const AsmToken &TokI = Parser.getTok();
+  if (TokI.isNot(AsmToken::Integer) && TokI.isNot(AsmToken::Minus))
+    return MatchOperand_NoMatch;
+
+  StringRef number = TokI.getString();
+  const size_t length = 1 + number.size();
+  StringRef token(SSS.getPointer(), length);
+
+  Operands.push_back(
+    AArch64Operand::CreateToken(token, false, SSS, getContext()));
+  Parser.Lex();
+
+  return MatchOperand_Success;
+}
+
+AArch64AsmParser::OperandMatchResultTy
+AArch64AsmParser::tryParseSVEPattern(OperandVector &Operands) {
+  MCAsmParser &Parser = getParser();
+
+  SMLoc SS = getLoc();
+  const AsmToken &TokE = Parser.getTok();
+  bool IsHash = TokE.is(AsmToken::Hash);
+
+  if (!IsHash && TokE.isNot(AsmToken::Identifier))
+    return MatchOperand_NoMatch;
+
+  int64_t Pattern;
+  if (IsHash) {
+    Parser.Lex(); // Eat hash
+
+    // Immediate operand.
+    const MCExpr *ImmVal;
+    SS = getLoc();
+    if (Parser.parseExpression(ImmVal))
+      return MatchOperand_NoMatch;
+
+    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(ImmVal);
+    if (!MCE)
+      return MatchOperand_NoMatch;
+
+    Pattern = MCE->getValue();
+    if (Pattern < 0 || Pattern > 31)
+      return MatchOperand_NoMatch;
+  } else {
+    auto Mapper = AArch64SVEPredPattern::Mapper();
+    bool Valid;
+    Pattern = (int32_t) Mapper.fromString(TokE.getString(),
+                                          getSTI().getFeatureBits(), Valid);
+
+    if (Pattern == AArch64SVEPredPattern::Invalid)
+      return MatchOperand_NoMatch;
+
+    assert (Pattern >= 0 && Pattern < 32);
+    Parser.Lex();
+  }
+
+  Operands.push_back(AArch64Operand::CreateImm(
+    MCConstantExpr::create(Pattern, getContext()), SS, getLoc(), getContext()));
+  return MatchOperand_Success;
+}
+
+AArch64AsmParser::OperandMatchResultTy
+AArch64AsmParser::tryParseMulImm4(OperandVector &Operands) {
+  MCAsmParser &Parser = getParser();
+  SMLoc SS = getLoc();
+  const AsmToken &TokE = Parser.getTok();
+  if (TokE.isNot(AsmToken::Identifier))
+    return MatchOperand_NoMatch;
+
+  if (!TokE.getString().equals_lower("mul") ||
+      Parser.getLexer().peekTok().isNot(AsmToken::Hash))
+    return MatchOperand_NoMatch;
+
+  Operands.push_back(AArch64Operand::CreateToken("mul", false,
+                                                 SS, getContext()));
+  Parser.Lex(); // Eat the "mul"
+  Parser.Lex(); // Eat the #
+
+  // Immediate operand.
+  const MCExpr *ImmVal;
+  SS = getLoc();
+  if (Parser.parseExpression(ImmVal))
+    return MatchOperand_ParseFail;
+
+  const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(ImmVal);
+  if (!MCE)
+    return MatchOperand_ParseFail;
+
+  int Val = MCE->getValue();
+  Operands.push_back(AArch64Operand::CreateImm(
+    MCConstantExpr::create(Val, getContext()), SS, getLoc(), getContext()));
+  return MatchOperand_Success;
+}
+
+AArch64AsmParser::OperandMatchResultTy
+AArch64AsmParser::tryParseSVEVectorList(OperandVector &Operands) {
+  MCAsmParser &Parser = getParser();
+
+  if (Parser.getTok().isNot(AsmToken::LCurly))
+    return MatchOperand_NoMatch;
+
+  SMLoc S = getLoc();
+  StringRef Kind;
+  int FirstReg =
+      tryMatchSVEVectorRegister(Parser.getLexer().peekTok(), Kind, false);
+  if (FirstReg == -1)
+    return MatchOperand_NoMatch;
+  Parser.Lex(); // Eat left bracket token.
+  Parser.Lex(); // Eat the SVE register token
+  int64_t PrevReg = FirstReg;
+  unsigned Count = 1;
+
+  if (Kind.empty())
+    return MatchOperand_NoMatch;
+  // TODO: Make sure the suffix matches the instruction, ".b" for "ld2b"
+
+  while (Parser.getTok().is(AsmToken::Comma)) {
+    Parser.Lex(); // Eat the comma token.
+
+    SMLoc Loc = getLoc();
+    StringRef NextKind;
+    int Reg = tryMatchSVEVectorRegister(Parser.getTok(), NextKind, false);
+    if (Reg == -1)
+      return MatchOperand_NoMatch;
+    Parser.Lex(); // Eat the SVE register token
+
+    // Any Kind suffices must match on all regs in the list.
+    if (Kind != NextKind) {
+      Error(Loc, "mismatched sve register size suffix");
+      return MatchOperand_ParseFail;
+    }
+
+    // Registers must be incremental (with wraparound at 31)
+    if (getContext().getRegisterInfo()->getEncodingValue(Reg) !=
+        (getContext().getRegisterInfo()->getEncodingValue(PrevReg) + 1) % 32) {
+      Error(Loc, "sve registers must be sequential");
+      return MatchOperand_ParseFail;
+    }
+
+    PrevReg = Reg;
+    Count++;
+  }
+
+  if (Count > 4) {
+    Error(S, "invalid number of sve vectors");
+    return MatchOperand_ParseFail;
+  }
+
+  if (Parser.getTok().isNot(AsmToken::RCurly)) {
+    Error(getLoc(), "'}' expected");
+    return MatchOperand_ParseFail;
+  }
+  Parser.Lex(); // Eat the '}' token.
+
+  const int NumElements = 0; // We don't know the number of elements
+  char ElementKind = Kind.lower()[Kind.size() - 1];
+  Operands.push_back(AArch64Operand::CreateVectorList(
+    FirstReg, Count, NumElements, ElementKind, true, S, getLoc(),
+    getContext()));
+  return MatchOperand_Success;
+}
+
+// This function deals with instructions like 'sqdecp xN, pX.h, wN',
+// where the list of AArch64Operands is given by:
+//  '<insn>', <GPR64>, <PPR>, '.<kind>', <GPR32>
+// and there is a constraint that xN = wN.
+void AArch64AsmParser::cvtXPredW(MCInst &Inst, const OperandVector & Operands) {
+  MCOperand XReg = MCOperand::createReg(Operands[1]->getReg());
+  MCOperand PReg = MCOperand::createReg(Operands[2]->getReg());
+  MCOperand WReg = MCOperand::createReg(Operands[4]->getReg());
+  Inst.addOperand(XReg);
+  Inst.addOperand(PReg);
+  Inst.addOperand(WReg);
+}
+
+// This function deals with instructions like 'sqdech xN, wN, vl32, mul #2',
+// where the list of AArch64Operands is given by:
+//   '<insn>',  <GPR64>,  <GPR32>, {<sve_pred_enum>, {<shift imm>}}
+// and there is a constraint that xN = wN.
+void AArch64AsmParser::cvtXWPatternImm(MCInst &Inst,
+                                       const OperandVector &Operands) {
+  MCOperand XReg = MCOperand::createReg(Operands[1]->getReg());
+  MCOperand WReg = MCOperand::createReg(Operands[2]->getReg());
+
+  int64_t PredicateImm = 31;
+  if (Operands.size() > 3) {
+    auto *Val = static_cast<AArch64Operand &>(*Operands[3]).getImm();
+    PredicateImm = dyn_cast<MCConstantExpr>(Val)->getValue();
+  }
+
+  int64_t ShiftImm = 1;
+  if (Operands.size() > 5) {
+    auto *Val = static_cast<AArch64Operand&>(*Operands[5]).getImm();
+    ShiftImm = dyn_cast<MCConstantExpr>(Val)->getValue();
+  }
+
+  Inst.addOperand(XReg);
+  Inst.addOperand(WReg);
+  Inst.addOperand(MCOperand::createImm(PredicateImm));
+  Inst.addOperand(MCOperand::createImm(ShiftImm));
+}
+
+template<class MapperClass>
+AArch64AsmParser::OperandMatchResultTy
+AArch64AsmParser::tryParseNamedFPImm(OperandVector &Operands) {
+  MCAsmParser &Parser = getParser();
+
+  const AsmToken &HashTok = Parser.getTok();
+  if (HashTok.isNot(AsmToken::Hash))
+    return MatchOperand_NoMatch;
+  Parser.Lex(); // Eat the hash.
+
+  const SMLoc S = getLoc();
+  const AsmToken &FPImmTok = Parser.getTok();
+  if (FPImmTok.isNot(AsmToken::Real))
+    return MatchOperand_NoMatch;
+
+  bool Valid;
+  unsigned ValID = MapperClass().fromString(FPImmTok.getString(),
+                                            getSTI().getFeatureBits(), Valid);
+
+  if (!Valid) {
+    Error(S, "Invalid floating point constant");
+    return MatchOperand_ParseFail;
+  }
+
+  Parser.Lex(); // Eat the constant.
+  auto CE = MCConstantExpr::create(ValID, getContext());
+  Operands.push_back(AArch64Operand::CreateImm(CE, S, getLoc(), getContext()));
 
   return MatchOperand_Success;
 }

@@ -628,9 +628,8 @@ static Constant *stripAndComputeConstantOffsets(const DataLayout &DL, Value *&V,
   } while (Visited.insert(V).second);
 
   Constant *OffsetIntPtr = ConstantInt::get(IntPtrTy, Offset);
-  if (V->getType()->isVectorTy())
-    return ConstantVector::getSplat(V->getType()->getVectorNumElements(),
-                                    OffsetIntPtr);
+  if (auto *VTy = dyn_cast<VectorType>(V->getType()))
+    return ConstantVector::getSplat(VTy->getElementCount(), OffsetIntPtr);
   return OffsetIntPtr;
 }
 
@@ -1572,6 +1571,10 @@ static Value *SimplifyAndInst(Value *Op0, Value *Op1, const Query &Q,
   if (match(Op1, m_AllOnes()))
     return Op0;
 
+  // TODO: m_AllOnes needs to support scalable vectors
+  if (match(Op1, m_SplatVector(m_AllOnes())))
+    return Op0;
+
   // A & ~A  =  ~A & A  =  0
   if (match(Op0, m_Not(m_Specific(Op1))) ||
       match(Op1, m_Not(m_Specific(Op0))))
@@ -1726,6 +1729,10 @@ static Value *SimplifyOrInst(Value *Op0, Value *Op1, const Query &Q,
 
   // X | -1 = -1
   if (match(Op1, m_AllOnes()))
+    return Op1;
+
+  // TODO: m_AllOnes needs to support scalable vectors
+  if (match(Op1, m_SplatVector(m_AllOnes())))
     return Op1;
 
   // A | ~A  =  ~A | A  =  -1
@@ -3493,8 +3500,11 @@ static Value *SimplifyGEPInst(Type *SrcTy, ArrayRef<Value *> Ops,
   // Compute the (pointer) type returned by the GEP instruction.
   Type *LastType = GetElementPtrInst::getIndexedType(SrcTy, Ops.slice(1));
   Type *GEPTy = PointerType::get(LastType, AS);
-  if (VectorType *VT = dyn_cast<VectorType>(Ops[0]->getType()))
-    GEPTy = VectorType::get(GEPTy, VT->getNumElements());
+  for (auto Op : Ops)
+    if (VectorType *VT = dyn_cast<VectorType>(Op->getType())) {
+      GEPTy = VectorType::get(GEPTy, VT->getElementCount());
+      break;
+    }
 
   if (isa<UndefValue>(Ops[0]))
     return UndefValue::get(GEPTy);

@@ -57,7 +57,7 @@ namespace ISD {
     AssertSext, AssertZext,
 
     /// Various leaf nodes.
-    BasicBlock, VALUETYPE, CONDCODE, Register, RegisterMask,
+    BasicBlock, VALUETYPE, CONDCODE, TESTCODE, Register, RegisterMask,
     Constant, ConstantFP,
     GlobalAddress, GlobalTLSAddress, FrameIndex,
     JumpTable, ConstantPool, ExternalSymbol, BlockAddress,
@@ -268,6 +268,10 @@ namespace ISD {
     /// the operands are implicitly truncated.
     BUILD_VECTOR,
 
+    /// ELEMENT_COUNT(TYPE) - Return the length of the given vector type in
+    /// terms of the number of elements.
+    ELEMENT_COUNT,
+
     /// INSERT_VECTOR_ELT(VECTOR, VAL, IDX) - Returns VECTOR with the element
     /// at IDX replaced with VAL.  If the type of VAL is larger than the vector
     /// element type then VAL is truncated before replacement.
@@ -293,6 +297,18 @@ namespace ISD {
     /// vector_length(VECTOR2) must be valid VECTOR1 indices.
     INSERT_SUBVECTOR,
 
+    /// WARNING: We have intentionally changed the meaning of this opcode.
+    /// IDX is now treated as a multiple of N for inputs of type NxMx??.
+    /// No change occurs for fixed width vectors as N=1 but for scalable
+    /// vectors it means we can half a vector using the indices 0 and M/2.
+    /// NOTE: The related change is also applied to INSERT_SUBVECTOR.
+    ///
+    /// TODO: We shall maintain this for the foreseeable future as doing
+    /// otherwise requires work with the result being no less contentious.
+    /// Two potential routes would be to introduce EXTRACT_HI/EXTRACT_LO opcodes
+    /// or maintain the original behaviour and correctly calculate the index,
+    /// along with extending optimisation to remove extracts of concat vectors.
+    ///
     /// EXTRACT_SUBVECTOR(VECTOR, IDX) - Returns a subvector from VECTOR (an
     /// vector value) starting with the element number IDX, which must be a
     /// constant multiple of the result vector length.
@@ -307,6 +323,26 @@ namespace ISD {
     /// in terms of the element size of VEC1/VEC2, not in terms of bytes.
     VECTOR_SHUFFLE,
 
+    /// VECTOR_SHUFFLE_VAR(VEC1, VEC2, VEC3) - like VECTOR_SHUFFLE,
+    /// except that the mask is represented as an SDNode and any out-of-range
+    /// mask element produces undefined (potentially faulting) behavior.
+    /// The mask elements can have any integer type.
+    VECTOR_SHUFFLE_VAR,
+
+    /// SERIES_VECTOR(INITIAL, STEP) - Creates a vector, with the first lane
+    /// containing INITIAL and each subsequent lane incremented by STEP
+    SERIES_VECTOR,
+
+    /// PROPAGATE_FIRST_ZERO(VEC) - Creates a vector with each output element
+    /// matching its input upto the first zero element, at which point that all
+    /// all subsequent output elements are set to zero.
+    PROPAGATE_FIRST_ZERO,
+
+    /// TEST_VECTOR(VEC, PRED) - Test the boolean vector input returning true or
+    /// false depending on a predicate.  The predicate applies to the complete
+    /// vector as apposed to the per-element predicate comparison of SETCC.
+    TEST_VECTOR,
+
     /// SCALAR_TO_VECTOR(VAL) - This represents the operation of loading a
     /// scalar value into element 0 of the resultant vector type.  The top
     /// elements 1 to N-1 of the N-element vector are undefined.  The type
@@ -314,6 +350,9 @@ namespace ISD {
     /// are integer types.  In this case the operand is allowed to be wider
     /// than the vector element type, and is implicitly truncated to it.
     SCALAR_TO_VECTOR,
+
+    /// SPLAT_VECTOR(VAL) - Duplicates the value across all lanes of a vector
+    SPLAT_VECTOR,
 
     /// MULHU/MULHS - Multiply high - Multiply two integers of type iN,
     /// producing an unsigned/signed value of type i[2*N], then return the top
@@ -939,6 +978,21 @@ namespace ISD {
     CVT_US,     /// Unsigned from Signed
     CVT_UU,     /// Unsigned from Unsigned
     CVT_INVALID /// Marker - Invalid opcode
+  };
+
+  //===--------------------------------------------------------------------===//
+  /// TestCode enum - This enum defines the various condition codes available to
+  /// TEST_VECTOR.
+  enum TestCode {
+    TEST_ALL_FALSE,
+    TEST_ALL_TRUE,
+    TEST_ANY_FALSE,
+    TEST_ANY_TRUE,
+    TEST_FIRST_FALSE,
+    TEST_FIRST_TRUE,
+    TEST_LAST_FALSE,
+    TEST_LAST_TRUE,
+    TEST_INVALID
   };
 
 } // end llvm::ISD namespace

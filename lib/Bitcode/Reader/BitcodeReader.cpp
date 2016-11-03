@@ -1804,16 +1804,19 @@ std::error_code BitcodeReader::parseTypeTableBody() {
         return error("Invalid type");
       ResultTy = ArrayType::get(ResultTy, Record[0]);
       break;
-    case bitc::TYPE_CODE_VECTOR:    // VECTOR: [numelts, eltty]
-      if (Record.size() < 2)
+    case bitc::TYPE_CODE_VECTOR: {  // VECTOR: [numblks, numelts, eltty]
+      unsigned Size = Record.size();
+      if (Size < 2)
         return error("Invalid record");
-      if (Record[0] == 0)
+      if (Record[Size - 2] == 0)
         return error("Invalid vector length");
-      ResultTy = getTypeByID(Record[1]);
+      ResultTy = getTypeByID(Record[Size - 1]);
       if (!ResultTy || !StructType::isValidElementType(ResultTy))
         return error("Invalid type");
-      ResultTy = VectorType::get(ResultTy, Record[0]);
+      ResultTy = VectorType::get(ResultTy, Record[Size - 2],
+                                 Size > 2 ? Record[Size - 3] : false);
       break;
+    }
     }
 
     if (NumRecords >= TypeList.size())
@@ -3104,7 +3107,7 @@ std::error_code BitcodeReader::parseConstants() {
       if (VectorType *VTy = dyn_cast<VectorType>(CurTy))
         if (Value *V = ValueList[Record[0]])
           if (SelectorTy != V->getType())
-            SelectorTy = VectorType::get(SelectorTy, VTy->getNumElements());
+            SelectorTy = VectorType::get(SelectorTy, VTy->getElementCount());
 
       V = ConstantExpr::getSelect(ValueList.getConstantFwdRef(Record[0],
                                                               SelectorTy),
@@ -3162,7 +3165,7 @@ std::error_code BitcodeReader::parseConstants() {
       Constant *Op0 = ValueList.getConstantFwdRef(Record[0], OpTy);
       Constant *Op1 = ValueList.getConstantFwdRef(Record[1], OpTy);
       Type *ShufTy = VectorType::get(Type::getInt32Ty(Context),
-                                                 OpTy->getNumElements());
+                                                 OpTy->getElementCount());
       Constant *Op2 = ValueList.getConstantFwdRef(Record[2], ShufTy);
       V = ConstantExpr::getShuffleVector(Op0, Op1, Op2);
       break;
@@ -3176,9 +3179,31 @@ std::error_code BitcodeReader::parseConstants() {
       Constant *Op0 = ValueList.getConstantFwdRef(Record[1], OpTy);
       Constant *Op1 = ValueList.getConstantFwdRef(Record[2], OpTy);
       Type *ShufTy = VectorType::get(Type::getInt32Ty(Context),
-                                                 RTy->getNumElements());
+                                                 RTy->getElementCount());
       Constant *Op2 = ValueList.getConstantFwdRef(Record[3], ShufTy);
       V = ConstantExpr::getShuffleVector(Op0, Op1, Op2);
+      break;
+    }
+    case bitc::CST_CODE_CE_SERIESVEC: { // CE_SERIESVEC:  [opty, opval, opval]
+      VectorType *RTy = dyn_cast<VectorType>(CurTy);
+      if (Record.size() < 3 || !RTy)
+        return error("Invalid record");
+      Type *Op0Ty = getTypeByID(Record[0]);
+      if (!Op0Ty)
+        return error("Invalid record");
+      Constant *Op0 = ValueList.getConstantFwdRef(Record[1], Op0Ty);
+      Constant *Op1 = ValueList.getConstantFwdRef(Record[2], Op0Ty);
+      V = ConstantExpr::getSeriesVector(RTy->getElementCount(), Op0, Op1);
+      break;
+    }
+    case bitc::CST_CODE_CE_ELTCOUNT: { // CE_ELTCOUNT: [opty, opval]
+      if (Record.size() < 2)
+        return error("Invalid record");
+      Type *OpTy = getTypeByID(Record[0]);
+      if (!OpTy)
+        return error("Invalid record");
+      Constant *Op = ValueList.getConstantFwdRef(Record[1], OpTy);
+      V = ConstantExpr::getElementCount(CurTy, Op);
       break;
     }
     case bitc::CST_CODE_CE_CMP: {     // CE_CMP: [opty, opval, opval, pred]
@@ -4687,6 +4712,48 @@ std::error_code BitcodeReader::parseFunctionBody(Function *F) {
         return error("Invalid type for value");
       I = new ShuffleVectorInst(Vec1, Vec2, Mask);
       InstructionList.push_back(I);
+      break;
+    }
+
+    case bitc::FUNC_CODE_INST_SERIESVEC: {
+                                    // SERIESVEC: [ty, opval, opty, opval, opty]
+      unsigned OpNum = 0;
+      Value *Op1, *Op2;
+      Type *Ty = getTypeByID(Record[OpNum++]);
+      if (getValueTypePair(Record, OpNum, NextValueNo, Op1) ||
+          popValue(Record, OpNum, NextValueNo, Op1->getType(), Op2))
+        return error("Invalid record");
+      I = new SeriesVectorInst(Ty, Op1, Op2);
+      break;
+    }
+
+    case bitc::FUNC_CODE_INST_ELTCOUNT: { // ELTCOUNT:  [ty, opval, opty]
+      unsigned OpNum = 0;
+      Value *Op;
+      Type *Ty = getTypeByID(Record[OpNum++]);
+      if (getValueTypePair(Record, OpNum, NextValueNo, Op))
+        return error("Invalid record");
+      I = new ElementCountInst(Ty, Op);
+      break;
+    }
+
+    case bitc::FUNC_CODE_INST_TEST: { // TEST: [pred, opty, opval]
+      unsigned OpNum = 0;
+      unsigned PredVal = Record[OpNum++];
+      Value *Op;
+      if (getValueTypePair(Record, OpNum, NextValueNo, Op))
+        return error("Invalid record");
+      I = new TestInst((TestInst::Predicate) PredVal, Op);
+      break;
+    }
+
+    case bitc::FUNC_CODE_INST_PROPFF: { // PROPFF:    [opval, opty, opval]
+      unsigned OpNum = 0;
+      Value *Op1, *Op2;
+      if (getValueTypePair(Record, OpNum, NextValueNo, Op1) ||
+          popValue(Record, OpNum, NextValueNo, Op1->getType(), Op2))
+        return error("Invalid record");
+      I = new PropFFInst(Op1, Op2);
       break;
     }
 

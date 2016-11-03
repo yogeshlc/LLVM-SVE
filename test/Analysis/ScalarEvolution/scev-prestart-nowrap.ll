@@ -33,7 +33,7 @@ define i64 @bad.0(i32 %start, i32 %low.limit, i32 %high.limit) {
   %postinc.inc = add nsw i32 %postinc, 1
   %postinc.sext = sext i32 %postinc to i64
 ; CHECK:  %postinc.sext = sext i32 %postinc to i64
-; CHECK-NEXT:  -->  {(sext i32 (1 + %start) to i64),+,1}<nsw><%loop>
+; CHECK-NEXT:  -->  {(1 + (sext i32 %start to i64))<nsw>,+,1}<nsw><%loop>
   %break.early = icmp slt i32 %postinc, %low.limit
   br i1 %break.early, label %continue, label %early.exit
 
@@ -61,7 +61,7 @@ define i64 @bad.1(i32 %start, i32 %low.limit, i32 %high.limit, i1* %unknown) {
   %postinc.inc = add nsw i32 %postinc, 1
   %postinc.sext = sext i32 %postinc to i64
 ; CHECK:  %postinc.sext = sext i32 %postinc to i64
-; CHECK-NEXT:  -->  {(sext i32 (1 + %start) to i64),+,1}<nsw><%loop>
+; CHECK-NEXT:  -->  {(1 + (sext i32 %start to i64))<nsw>,+,1}<nsw><%loop>
   %break.early = icmp slt i32 %postinc, %low.limit
   br i1 %break.early, label %continue.1, label %early.exit
 

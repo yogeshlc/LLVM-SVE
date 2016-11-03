@@ -256,9 +256,9 @@ entry:
 ; UNROLL-LABEL: veciv
 ; UNROLL: vector.body:
 ; UNROLL: %index = phi i32 [ 0, %vector.ph ], [ %index.next, %vector.body ]
-; UNROLL: %vec.ind = phi <2 x i32> [ <i32 0, i32 1>, %vector.ph ], [ %step.add1, %vector.body ]
+; UNROLL: %vec.ind = phi <2 x i32> [ <i32 0, i32 1>, %vector.ph ], [ %[[LASTSTEP:step\.add[0-9]*]], %vector.body ]
 ; UNROLL: %step.add = add <2 x i32> %vec.ind, <i32 2, i32 2>
-; UNROLL: %step.add1 = add <2 x i32> %vec.ind, <i32 4, i32 4>
+; UNROLL: %[[LASTSTEP]] = add <2 x i32> %vec.ind, <i32 4, i32 4>
 ; UNROLL: %index.next = add i32 %index, 4
 ; UNROLL: %[[CMP:.*]] = icmp eq i32 %index.next
 ; UNROLL: br i1 %[[CMP]]

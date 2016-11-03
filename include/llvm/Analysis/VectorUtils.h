@@ -42,11 +42,16 @@ bool isTriviallyVectorizable(Intrinsic::ID ID);
 /// ctlz,cttz and powi special intrinsics whose argument is scalar.
 bool hasVectorInstrinsicScalarOpd(Intrinsic::ID ID, unsigned ScalarOpdIdx);
 
+/// \brief Returns true if the given vector intrinsic is maskable.
+bool isMaskedVectorIntrinsic(Intrinsic::ID ID);
+
 /// \brief Returns intrinsic ID for call.
 /// For the input call instruction it finds mapping intrinsic and returns
 /// its intrinsic ID, in case it does not found it return not_intrinsic.
+/// If UseMask is true, then find a masking vectorized function if available.
 Intrinsic::ID getVectorIntrinsicIDForCall(const CallInst *CI,
-                                          const TargetLibraryInfo *TLI);
+                                          const TargetLibraryInfo *TLI,
+                                          bool UseMask = false);
 
 /// \brief Find the operand of the GEP that should be checked for consecutive
 /// stores. This ignores trailing indices that have no effect on the final

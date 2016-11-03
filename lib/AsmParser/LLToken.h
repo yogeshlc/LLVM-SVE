@@ -37,6 +37,7 @@ enum Kind {
   exclaim, // !
   bar,     // |
 
+  kw_n,
   kw_x,
   kw_true,
   kw_false,
@@ -71,6 +72,7 @@ enum Kind {
   kw_undef,
   kw_null,
   kw_none,
+  kw_as,
   kw_to,
   kw_caller,
   kw_within,
@@ -238,6 +240,9 @@ enum Kind {
   kw_uno,
   kw_ueq,
   kw_une,
+  kw_all,
+  kw_first,
+  kw_last,
 
   // atomicrmw operations that aren't also instruction keywords.
   kw_xchg,
@@ -268,6 +273,7 @@ enum Kind {
   kw_xor,
   kw_icmp,
   kw_fcmp,
+  kw_test,
 
   kw_phi,
   kw_call,
@@ -320,6 +326,9 @@ enum Kind {
   kw_extractvalue,
   kw_insertvalue,
   kw_blockaddress,
+  kw_elementcount,
+  kw_seriesvector,
+  kw_propff,
 
   // Metadata types.
   kw_distinct,

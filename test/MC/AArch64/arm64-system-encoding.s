@@ -1,5 +1,6 @@
-; RUN: not llvm-mc -triple arm64-apple-darwin -show-encoding < %s 2> %t | FileCheck %s
+; RUN: not llvm-mc -triple arm64-apple-darwin -mattr=+sve -show-encoding < %s 2> %t | FileCheck %s
 ; RUN: FileCheck --check-prefix=CHECK-ERRORS < %t %s
+; RUN: not llvm-mc -triple arm64-apple-darwin -show-encoding < %s 2>&1 > /dev/null | FileCheck --check-prefix=CHECK-SVE-DISABLED %s
 
 foo:
 
@@ -63,6 +64,7 @@ foo:
   msr AFSR0_EL1, x3
   msr AFSR0_EL2, x3
   msr AFSR0_EL3, x3
+  msr ZIDR_EL1, x3
   msr AFSR1_EL1, x3
   msr AFSR1_EL2, x3
   msr AFSR1_EL3, x3
@@ -86,6 +88,10 @@ foo:
   msr CPACR_EL1, x3
   msr CPTR_EL2, x3
   msr CPTR_EL3, x3
+  msr ZCR_EL1, x3
+  msr ZCR_EL2, x3
+  msr ZCR_EL3, x3
+  msr ZCR_EL12, x3
   msr CSSELR_EL1, x3
   msr CURRENTEL, x3
   msr DACR32_EL2, x3
@@ -100,6 +106,7 @@ foo:
   msr HCR_EL2, x3
   msr HPFAR_EL2, x3
   msr HSTR_EL2, x3
+  mrs ID_AA64ZFR0_EL1, x3
   msr IFSR32_EL2, x3
   msr MAIR_EL1, x3
   msr MAIR_EL2, x3
@@ -143,6 +150,9 @@ foo:
 ; CHECK: msr AFSR0_EL1, x3              ; encoding: [0x03,0x51,0x18,0xd5]
 ; CHECK: msr AFSR0_EL2, x3              ; encoding: [0x03,0x51,0x1c,0xd5]
 ; CHECK: msr AFSR0_EL3, x3              ; encoding: [0x03,0x51,0x1e,0xd5]
+;  ZIDR_EL1 is read only
+; CHECK-ERRORS: msr ZIDR_EL1, x3
+; CHECK-SVE-DISABLED: msr ZIDR_EL1, x3
 ; CHECK: msr AFSR1_EL1, x3              ; encoding: [0x23,0x51,0x18,0xd5]
 ; CHECK: msr AFSR1_EL2, x3              ; encoding: [0x23,0x51,0x1c,0xd5]
 ; CHECK: msr AFSR1_EL3, x3              ; encoding: [0x23,0x51,0x1e,0xd5]
@@ -166,6 +176,14 @@ foo:
 ; CHECK: msr CPACR_EL1, x3              ; encoding: [0x43,0x10,0x18,0xd5]
 ; CHECK: msr CPTR_EL2, x3               ; encoding: [0x43,0x11,0x1c,0xd5]
 ; CHECK: msr CPTR_EL3, x3               ; encoding: [0x43,0x11,0x1e,0xd5]
+; CHECK: msr ZCR_EL1, x3                ; encoding: [0x03,0x12,0x18,0xd5]
+; CHECK-SVE-DISABLED: msr ZCR_EL1, x3
+; CHECK: msr ZCR_EL2, x3                ; encoding: [0x03,0x12,0x1c,0xd5]
+; CHECK-SVE-DISABLED: msr ZCR_EL2, x3
+; CHECK: msr ZCR_EL3, x3                ; encoding: [0x03,0x12,0x1e,0xd5]
+; CHECK-SVE-DISABLED: msr ZCR_EL3, x3
+; CHECK: msr ZCR_EL12, x3               ; encoding: [0x03,0x12,0x1d,0xd5]
+; CHECK-SVE-DISABLED: msr ZCR_EL12, x3
 ; CHECK: msr CSSELR_EL1, x3             ; encoding: [0x03,0x00,0x1a,0xd5]
 ; CHECK: msr CURRENTEL, x3              ; encoding: [0x43,0x42,0x18,0xd5]
 ; CHECK: msr DACR32_EL2, x3             ; encoding: [0x03,0x30,0x1c,0xd5]
@@ -180,6 +198,9 @@ foo:
 ; CHECK: msr HCR_EL2, x3                ; encoding: [0x03,0x11,0x1c,0xd5]
 ; CHECK: msr HPFAR_EL2, x3              ; encoding: [0x83,0x60,0x1c,0xd5]
 ; CHECK: msr HSTR_EL2, x3               ; encoding: [0x63,0x11,0x1c,0xd5]
+;  ID_AA64ZFR0_EL1 is read only
+; CHECK-ERRORS: mrs ID_AA64ZFR0_EL1, x3
+; CHECK-SVE-DISABLED: mrs ID_AA64ZFR0_EL1, x3
 ; CHECK: msr IFSR32_EL2, x3             ; encoding: [0x23,0x50,0x1c,0xd5]
 ; CHECK: msr MAIR_EL1, x3               ; encoding: [0x03,0xa2,0x18,0xd5]
 ; CHECK: msr MAIR_EL2, x3               ; encoding: [0x03,0xa2,0x1c,0xd5]
@@ -225,6 +246,7 @@ foo:
   mrs x3, AFSR0_EL2
   mrs x3, AFSR0_EL3
   mrs x3, AIDR_EL1
+  mrs x3, ZIDR_EL1
   mrs x3, AFSR1_EL1
   mrs x3, AFSR1_EL2
   mrs x3, AFSR1_EL3
@@ -252,6 +274,10 @@ foo:
   mrs x3, CPACR_EL1
   mrs x3, CPTR_EL2
   mrs x3, CPTR_EL3
+  mrs x3, ZCR_EL1
+  mrs x3, ZCR_EL2
+  mrs x3, ZCR_EL3
+  mrs x3, ZCR_EL12
   mrs x3, CSSELR_EL1
   mrs x3, CTR_EL0
   mrs x3, CURRENTEL
@@ -275,6 +301,7 @@ foo:
   mrs x3, ID_AA64ISAR1_EL1
   mrs x3, ID_AA64MMFR0_EL1
   mrs x3, ID_AA64MMFR1_EL1
+  mrs x3, ID_AA64ZFR0_EL1
   mrs x3, ID_AA64PFR0_EL1
   mrs x3, ID_AA64PFR1_EL1
   mrs x3, IFSR32_EL2
@@ -410,6 +437,8 @@ foo:
 ; CHECK: mrs x3, AFSR0_EL2              ; encoding: [0x03,0x51,0x3c,0xd5]
 ; CHECK: mrs x3, AFSR0_EL3              ; encoding: [0x03,0x51,0x3e,0xd5]
 ; CHECK: mrs x3, AIDR_EL1               ; encoding: [0xe3,0x00,0x39,0xd5]
+; CHECK: mrs x3, ZIDR_EL1               ; encoding: [0xe3,0x00,0x38,0xd5]
+; CHECK-SVE-DISABLED: mrs x3, ZIDR_EL1
 ; CHECK: mrs x3, AFSR1_EL1              ; encoding: [0x23,0x51,0x38,0xd5]
 ; CHECK: mrs x3, AFSR1_EL2              ; encoding: [0x23,0x51,0x3c,0xd5]
 ; CHECK: mrs x3, AFSR1_EL3              ; encoding: [0x23,0x51,0x3e,0xd5]
@@ -437,6 +466,14 @@ foo:
 ; CHECK: mrs x3, CPACR_EL1              ; encoding: [0x43,0x10,0x38,0xd5]
 ; CHECK: mrs x3, CPTR_EL2               ; encoding: [0x43,0x11,0x3c,0xd5]
 ; CHECK: mrs x3, CPTR_EL3               ; encoding: [0x43,0x11,0x3e,0xd5]
+; CHECK: mrs x3, ZCR_EL1                ; encoding: [0x03,0x12,0x38,0xd5]
+; CHECK-SVE-DISABLED: mrs x3, ZCR_EL1
+; CHECK: mrs x3, ZCR_EL2                ; encoding: [0x03,0x12,0x3c,0xd5]
+; CHECK-SVE-DISABLED: mrs x3, ZCR_EL2
+; CHECK: mrs x3, ZCR_EL3                ; encoding: [0x03,0x12,0x3e,0xd5]
+; CHECK-SVE-DISABLED: mrs x3, ZCR_EL3
+; CHECK: mrs x3, ZCR_EL12               ; encoding: [0x03,0x12,0x3d,0xd5]
+; CHECK-SVE-DISABLED: mrs x3, ZCR_EL12
 ; CHECK: mrs x3, CSSELR_EL1             ; encoding: [0x03,0x00,0x3a,0xd5]
 ; CHECK: mrs x3, CTR_EL0                ; encoding: [0x23,0x00,0x3b,0xd5]
 ; CHECK: mrs x3, CURRENTEL              ; encoding: [0x43,0x42,0x38,0xd5]
@@ -460,6 +497,8 @@ foo:
 ; CHECK: mrs x3, ID_AA64ISAR1_EL1       ; encoding: [0x23,0x06,0x38,0xd5]
 ; CHECK: mrs x3, ID_AA64MMFR0_EL1       ; encoding: [0x03,0x07,0x38,0xd5]
 ; CHECK: mrs x3, ID_AA64MMFR1_EL1       ; encoding: [0x23,0x07,0x38,0xd5]
+; CHECK: mrs x3, ID_AA64ZFR0_EL1        ; encoding: [0x83,0x04,0x38,0xd5]
+; CHECK-SVE-DISABLED: mrs x3, ID_AA64ZFR0_EL1
 ; CHECK: mrs x3, ID_AA64PFR0_EL1        ; encoding: [0x03,0x04,0x38,0xd5]
 ; CHECK: mrs x3, ID_AA64PFR1_EL1        ; encoding: [0x23,0x04,0x38,0xd5]
 ; CHECK: mrs x3, IFSR32_EL2             ; encoding: [0x23,0x50,0x3c,0xd5]

@@ -28,7 +28,11 @@ namespace llvm {
   /// type can be represented by an MVT.
 class MVT {
   public:
-    enum SimpleValueType : int8_t {
+  // TODO: Community changed from autotyped to int8_t here, but that isn't
+  // big enough to contain all our new types and still have the max
+  // valuetype be a multiple of 32. Resolve once we can discuss with the
+  // community.
+    enum SimpleValueType : int16_t {
       // INVALID_SIMPLE_VALUE_TYPE - Simple value types less than zero are
       // considered extended value types.
       INVALID_SIMPLE_VALUE_TYPE = -1,
@@ -101,45 +105,94 @@ class MVT {
 
       v1i128         =  51,   //  1 x i128
 
-      FIRST_INTEGER_VECTOR_VALUETYPE = v2i1,
-      LAST_INTEGER_VECTOR_VALUETYPE = v1i128,
+      nxv2i1         =  52,
+      nxv4i1         =  53,
+      nxv8i1         =  54,
+      nxv16i1        =  55,
+      nxv32i1        =  56,
+      nxv1i8         =  57,
+      nxv2i8         =  58,
+      nxv4i8         =  59,
+      nxv8i8         =  60,
+      nxv16i8        =  61,
+      nxv32i8        =  62,
+      nxv1i16        =  63,
+      nxv2i16        =  64,
+      nxv4i16        =  65,
+      nxv8i16        =  66,
+      nxv16i16       =  67,
+      nxv32i16       =  68,
+      nxv1i32        =  69,
+      nxv2i32        =  70,
+      nxv4i32        =  71,
+      nxv8i32        =  72,
+      nxv16i32       =  73,
+      nxv32i32       =  74,
+      nxv1i64        =  75,
+      nxv2i64        =  76,
+      nxv4i64        =  77,
+      nxv8i64        =  78,
+      nxv16i64       =  79,
+      nxv32i64       =  80,
 
-      v2f16          =  52,   //  2 x f16
-      v4f16          =  53,   //  4 x f16
-      v8f16          =  54,   //  8 x f16
-      v1f32          =  55,   //  1 x f32
-      v2f32          =  56,   //  2 x f32
-      v4f32          =  57,   //  4 x f32
-      v8f32          =  58,   //  8 x f32
-      v16f32         =  59,   // 16 x f32
-      v1f64          =  60,   //  1 x f64
-      v2f64          =  61,   //  2 x f64
-      v4f64          =  62,   //  4 x f64
-      v8f64          =  63,   //  8 x f64
+      FIRST_INTEGER_VECTOR_VALUETYPE = v2i1,
+      LAST_INTEGER_VECTOR_VALUETYPE = nxv32i64,
+
+      FIRST_INTEGER_SCALABLE_VALUETYPE = nxv2i1,
+      LAST_INTEGER_SCALABLE_VALUETYPE = nxv32i64,
+
+      v2f16          =  81,   //  2 x f16
+      v4f16          =  82,   //  4 x f16
+      v8f16          =  83,   //  8 x f16
+      v1f32          =  84,   //  1 x f32
+      v2f32          =  85,   //  2 x f32
+      v4f32          =  86,   //  4 x f32
+      v8f32          =  87,   //  8 x f32
+      v16f32         =  88,   // 16 x f32
+      v1f64          =  89,   //  1 x f64
+      v2f64          =  90,   //  2 x f64
+      v4f64          =  91,   //  4 x f64
+      v8f64          =  92,   //  8 x f64
+
+      nxv2f16        =  93,
+      nxv4f16        =  94,
+      nxv8f16        =  95,
+      nxv1f32        =  96,
+      nxv2f32        =  97,
+      nxv4f32        =  98,
+      nxv8f32        =  99,
+      nxv16f32       = 100,
+      nxv1f64        = 101,
+      nxv2f64        = 102,
+      nxv4f64        = 103,
+      nxv8f64        = 104,
 
       FIRST_FP_VECTOR_VALUETYPE = v2f16,
-      LAST_FP_VECTOR_VALUETYPE = v8f64,
+      LAST_FP_VECTOR_VALUETYPE = nxv8f64,
+
+      FIRST_FP_SCALABLE_VALUETYPE = nxv2f16,
+      LAST_FP_SCALABLE_VALUETYPE = nxv8f64,
 
       FIRST_VECTOR_VALUETYPE = v2i1,
-      LAST_VECTOR_VALUETYPE  = v8f64,
+      LAST_VECTOR_VALUETYPE  = nxv8f64,
 
-      x86mmx         =  64,   // This is an X86 MMX value
+      x86mmx         = 105,   // This is an X86 MMX value
 
-      Glue           =  65,   // This glues nodes together during pre-RA sched
+      Glue           = 106,   // This glues nodes together during pre-RA sched
 
-      isVoid         =  66,   // This has no value
+      isVoid         = 107,   // This has no value
 
-      Untyped        =  67,   // This value takes a register, but has
+      Untyped        = 108,   // This value takes a register, but has
                               // unspecified type.  The register class
                               // will be determined by the opcode.
 
       FIRST_VALUETYPE = 0,    // This is always the beginning of the list.
-      LAST_VALUETYPE =  68,   // This always remains at the end of the list.
+      LAST_VALUETYPE = 109,   // This always remains at the end of the list.
 
       // This is the current maximum for LAST_VALUETYPE.
       // MVT::MAX_ALLOWED_VALUETYPE is used for asserts and to size bit vectors
       // This value must be a multiple of 32.
-      MAX_ALLOWED_VALUETYPE = 96,
+      MAX_ALLOWED_VALUETYPE = 128,
 
       // Token - A value of type llvm::TokenTy
       token          = 120,
@@ -177,6 +230,37 @@ class MVT {
     };
 
     SimpleValueType SimpleTy;
+
+    class ElementCount {
+    public:
+      unsigned Min;
+      bool Scalable;
+
+      ElementCount(unsigned Min, bool Scalable)
+      : Min(Min), Scalable(Scalable) {}
+
+      ElementCount operator*(unsigned RHS) {
+        return { Min * RHS, Scalable };
+      }
+
+      ElementCount& operator*=(unsigned RHS) {
+        Min *= RHS;
+        return *this;
+      }
+
+      ElementCount operator/(unsigned RHS) {
+        return { Min / RHS, Scalable };
+      }
+
+      ElementCount& operator/=(unsigned RHS) {
+        Min /= RHS;
+        return *this;
+      }
+
+      bool operator==(const ElementCount& RHS) {
+        return Min == RHS.Min && Scalable == RHS.Scalable;
+      }
+    };
 
     LLVM_CONSTEXPR MVT() : SimpleTy(INVALID_SIMPLE_VALUE_TYPE) {}
     LLVM_CONSTEXPR MVT(SimpleValueType SVT) : SimpleTy(SVT) { }
@@ -221,6 +305,14 @@ class MVT {
     bool isVector() const {
       return (SimpleTy >= MVT::FIRST_VECTOR_VALUETYPE &&
               SimpleTy <= MVT::LAST_VECTOR_VALUETYPE);
+    }
+
+    // Scalable vectors -- exact width is machine dependent
+    bool isScalableVector() const {
+      return ((SimpleTy >= MVT::FIRST_INTEGER_SCALABLE_VALUETYPE &&
+               SimpleTy <= MVT::LAST_INTEGER_SCALABLE_VALUETYPE) ||
+              (SimpleTy >= MVT::FIRST_FP_SCALABLE_VALUETYPE &&
+               SimpleTy <= MVT::LAST_FP_SCALABLE_VALUETYPE));
     }
 
     /// is16BitVector - Return true if this is a 16-bit vector type.
@@ -321,7 +413,13 @@ class MVT {
       case v32i1:
       case v64i1:
       case v512i1:
-      case v1024i1: return i1;
+      case v1024i1:
+      case nxv2i1:
+      case nxv4i1:
+      case nxv8i1:
+      case nxv16i1:
+      case nxv32i1: return i1;
+
       case v1i8:
       case v2i8:
       case v4i8:
@@ -330,7 +428,14 @@ class MVT {
       case v32i8:
       case v64i8:
       case v128i8:
-      case v256i8: return i8;
+      case v256i8:
+      case nxv1i8:
+      case nxv2i8:
+      case nxv4i8:
+      case nxv8i8:
+      case nxv16i8:
+      case nxv32i8: return i8;
+
       case v1i16:
       case v2i16:
       case v4i16:
@@ -338,33 +443,68 @@ class MVT {
       case v16i16:
       case v32i16:
       case v64i16:
-      case v128i16: return i16;
+      case v128i16:
+      case nxv1i16:
+      case nxv2i16:
+      case nxv4i16:
+      case nxv8i16:
+      case nxv16i16:
+      case nxv32i16: return i16;
+
       case v1i32:
       case v2i32:
       case v4i32:
       case v8i32:
       case v16i32:
       case v32i32:
-      case v64i32: return i32;
+      case v64i32:
+      case nxv1i32:
+      case nxv2i32:
+      case nxv4i32:
+      case nxv8i32:
+      case nxv16i32:
+      case nxv32i32: return i32;
+
       case v1i64:
       case v2i64:
       case v4i64:
       case v8i64:
       case v16i64:
-      case v32i64: return i64;
+      case v32i64:
+      case nxv1i64:
+      case nxv2i64:
+      case nxv4i64:
+      case nxv8i64:
+      case nxv16i64:
+      case nxv32i64: return i64;
+
       case v1i128: return i128;
+
       case v2f16:
       case v4f16:
-      case v8f16: return f16;
+      case v8f16:
+      case nxv2f16:
+      case nxv4f16:
+      case nxv8f16: return f16;
       case v1f32:
       case v2f32:
       case v4f32:
       case v8f32:
-      case v16f32: return f32;
+      case v16f32:
+      case nxv1f32:
+      case nxv2f32:
+      case nxv4f32:
+      case nxv8f32:
+      case nxv16f32: return f32;
+
       case v1f64:
       case v2f64:
       case v4f64:
-      case v8f64: return f64;
+      case v8f64:
+      case nxv1f64:
+      case nxv2f64:
+      case nxv4f64:
+      case nxv8f64: return f64;
       }
     }
 
@@ -375,55 +515,108 @@ class MVT {
       case v1024i1: return 1024;
       case v512i1: return 512;
       case v256i8: return 256;
+
       case v128i8:
       case v128i16: return 128;
+
       case v64i1:
       case v64i8:
       case v64i16:
       case v64i32: return 64;
+
       case v32i1:
+      case nxv32i1:
       case v32i8:
+      case nxv32i8:
       case v32i16:
+      case nxv32i16:
       case v32i32:
-      case v32i64: return 32;
+      case nxv32i32:
+      case v32i64:
+      case nxv32i64: return 32;
+
       case v16i1:
+      case nxv16i1:
       case v16i8:
+      case nxv16i8:
       case v16i16:
+      case nxv16i16:
       case v16i32:
+      case nxv16i32:
+      case nxv16f32:
       case v16i64:
+      case nxv16i64:
       case v16f32: return 16;
+
       case v8i1:
+      case nxv8i1:
       case v8i8:
+      case nxv8i8:
       case v8i16:
+      case nxv8i16:
       case v8i32:
+      case nxv8i32:
       case v8i64:
+      case nxv8i64:
       case v8f16:
+      case nxv8f16:
       case v8f32:
-      case v8f64: return 8;
+      case nxv8f32:
+      case v8f64:
+      case nxv8f64: return 8;
+
       case v4i1:
+      case nxv4i1:
       case v4i8:
+      case nxv4i8:
       case v4i16:
+      case nxv4i16:
       case v4i32:
+      case nxv4i32:
       case v4i64:
+      case nxv4i64:
       case v4f16:
+      case nxv4f16:
       case v4f32:
-      case v4f64: return 4;
+      case nxv4f32:
+      case v4f64:
+      case nxv4f64: return 4;
+
       case v2i1:
+      case nxv2i1:
       case v2i8:
+      case nxv2i8:
       case v2i16:
+      case nxv2i16:
       case v2i32:
+      case nxv2i32:
       case v2i64:
+      case nxv2i64:
       case v2f16:
+      case nxv2f16:
       case v2f32:
-      case v2f64: return 2;
+      case nxv2f32:
+      case v2f64:
+      case nxv2f64: return 2;
+
       case v1i8:
+      case nxv1i8:
       case v1i16:
+      case nxv1i16:
       case v1i32:
+      case nxv1i32:
       case v1i64:
+      case nxv1i64:
       case v1i128:
       case v1f32:
-      case v1f64: return 1;
+      case nxv1f32:
+      case v1f64:
+      case nxv1f64: return 1;
       }
+    }
+
+    MVT::ElementCount getVectorElementCount() const {
+      return { getVectorNumElements(), isScalableVector() };
     }
 
     unsigned getSizeInBits() const {
@@ -446,69 +639,119 @@ class MVT {
       case Metadata:
         llvm_unreachable("Value type is metadata.");
       case i1  :  return 1;
-      case v2i1:  return 2;
-      case v4i1:  return 4;
+
+      case v2i1:
+      case nxv2i1: return 2;
+
+      case v4i1:
+      case nxv4i1: return 4;
+
       case i8  :
       case v1i8:
-      case v8i1: return 8;
+      case nxv1i8:
+      case v8i1:
+      case nxv8i1: return 8;
+
       case i16 :
       case f16:
       case v16i1:
+      case nxv16i1:
       case v2i8:
-      case v1i16: return 16;
+      case nxv2i8:
+      case v1i16:
+      case nxv1i16: return 16;
+
       case f32 :
       case i32 :
       case v32i1:
+      case nxv32i1:
       case v4i8:
+      case nxv4i8:
       case v2i16:
+      case nxv2i16:
       case v2f16:
+      case nxv2f16:
       case v1f32:
-      case v1i32: return 32;
+      case nxv1f32:
+      case v1i32:
+      case nxv1i32: return 32;
+
       case x86mmx:
       case f64 :
       case i64 :
       case v64i1:
       case v8i8:
+      case nxv8i8:
       case v4i16:
+      case nxv4i16:
       case v2i32:
+      case nxv2i32:
       case v1i64:
+      case nxv1i64:
       case v4f16:
+      case nxv4f16:
       case v2f32:
-      case v1f64: return 64;
+      case nxv2f32:
+      case v1f64:
+      case nxv1f64: return 64;
+
       case f80 :  return 80;
+
       case f128:
       case ppcf128:
       case i128:
       case v16i8:
+      case nxv16i8:
       case v8i16:
+      case nxv8i16:
       case v4i32:
+      case nxv4i32:
       case v2i64:
+      case nxv2i64:
       case v1i128:
       case v8f16:
+      case nxv8f16:
       case v4f32:
-      case v2f64: return 128;
+      case nxv4f32:
+      case v2f64:
+      case nxv2f64: return 128;
+
       case v32i8:
+      case nxv32i8:
       case v16i16:
+      case nxv16i16:
       case v8i32:
+      case nxv8i32:
       case v4i64:
+      case nxv4i64:
       case v8f32:
-      case v4f64: return 256;
+      case nxv8f32:
+      case v4f64:
+      case nxv4f64: return 256;
       case v512i1:
       case v64i8:
       case v32i16:
+      case nxv32i16:
       case v16i32:
+      case nxv16i32:
       case v8i64:
+      case nxv8i64:
       case v16f32:
-      case v8f64: return 512;
+      case nxv16f32:
+      case v8f64:
+      case nxv8f64: return 512;
       case v1024i1:
       case v128i8:
       case v64i16:
       case v32i32:
-      case v16i64: return 1024;
+      case nxv32i32:
+      case v16i64:
+      case nxv16i64: return 1024;
       case v256i8:
       case v128i16:
       case v64i32:
-      case v32i64: return 2048;
+      case v32i64:
+      case nxv32i64: return 2048;
       }
     }
 
@@ -583,6 +826,71 @@ class MVT {
       case 128:
         return MVT::i128;
       }
+    }
+
+    static MVT getScalableVectorVT(MVT VT, unsigned NumElements) {
+      switch(VT.SimpleTy) {
+      default:
+	break;
+      case MVT::i1:
+        if (NumElements == 2)  return MVT::nxv2i1;
+        if (NumElements == 4)  return MVT::nxv4i1;
+        if (NumElements == 8)  return MVT::nxv8i1;
+        if (NumElements == 16) return MVT::nxv16i1;
+        if (NumElements == 32) return MVT::nxv32i1;
+        break;
+      case MVT::i8:
+        if (NumElements == 1)  return MVT::nxv1i8;
+        if (NumElements == 2)  return MVT::nxv2i8;
+        if (NumElements == 4)  return MVT::nxv4i8;
+        if (NumElements == 8)  return MVT::nxv8i8;
+        if (NumElements == 16) return MVT::nxv16i8;
+        if (NumElements == 32) return MVT::nxv32i8;
+        break;
+      case MVT::i16:
+        if (NumElements == 1)  return MVT::nxv1i16;
+        if (NumElements == 2)  return MVT::nxv2i16;
+        if (NumElements == 4)  return MVT::nxv4i16;
+        if (NumElements == 8)  return MVT::nxv8i16;
+        if (NumElements == 16) return MVT::nxv16i16;
+        if (NumElements == 32) return MVT::nxv32i16;
+        break;
+      case MVT::i32:
+        if (NumElements == 1)  return MVT::nxv1i32;
+        if (NumElements == 2)  return MVT::nxv2i32;
+        if (NumElements == 4)  return MVT::nxv4i32;
+        if (NumElements == 8)  return MVT::nxv8i32;
+        if (NumElements == 16) return MVT::nxv16i32;
+        if (NumElements == 32) return MVT::nxv32i32;
+        break;
+      case MVT::i64:
+        if (NumElements == 1)  return MVT::nxv1i64;
+        if (NumElements == 2)  return MVT::nxv2i64;
+        if (NumElements == 4)  return MVT::nxv4i64;
+        if (NumElements == 8)  return MVT::nxv8i64;
+        if (NumElements == 16) return MVT::nxv16i64;
+        if (NumElements == 32) return MVT::nxv32i64;
+        break;
+      case MVT::f16:
+        if (NumElements == 2)  return MVT::nxv2f16;
+        if (NumElements == 4)  return MVT::nxv4f16;
+        if (NumElements == 8)  return MVT::nxv8f16;
+        break;
+      case MVT::f32:
+        if (NumElements == 1)  return MVT::nxv1f32;
+        if (NumElements == 2)  return MVT::nxv2f32;
+        if (NumElements == 4)  return MVT::nxv4f32;
+        if (NumElements == 8)  return MVT::nxv8f32;
+        if (NumElements == 16) return MVT::nxv16f32;
+        break;
+      case MVT::f64:
+        if (NumElements == 1)  return MVT::nxv1f64;
+        if (NumElements == 2)  return MVT::nxv2f64;
+        if (NumElements == 4)  return MVT::nxv4f64;
+        if (NumElements == 8)  return MVT::nxv8f64;
+        break;
+      }
+      return (MVT::SimpleValueType)(MVT::INVALID_SIMPLE_VALUE_TYPE);
     }
 
     static MVT getVectorVT(MVT VT, unsigned NumElements) {
@@ -662,6 +970,18 @@ class MVT {
       return (MVT::SimpleValueType)(MVT::INVALID_SIMPLE_VALUE_TYPE);
     }
 
+    static MVT getVectorVT(MVT VT, unsigned NumElements, bool IsScalable) {
+      if (IsScalable)
+        return getScalableVectorVT(VT, NumElements);
+      return getVectorVT(VT, NumElements);
+    }
+
+    static MVT getVectorVT(MVT VT, MVT::ElementCount EC) {
+      if (EC.Scalable)
+        return getScalableVectorVT(VT, EC.Min);
+      return getVectorVT(VT, EC.Min);
+    }
+
     /// Return the value type corresponding to the specified type.  This returns
     /// all pointers as iPTR.  If HandleUnknown is true, unknown types are
     /// returned as Other, otherwise they are invalid.
@@ -711,6 +1031,14 @@ class MVT {
       return mvt_range(
           MVT::FIRST_FP_VECTOR_VALUETYPE,
           (MVT::SimpleValueType)(MVT::LAST_FP_VECTOR_VALUETYPE + 1));
+    }
+    static mvt_range integer_wa_vector_valuetypes() {
+      return mvt_range(MVT::FIRST_INTEGER_SCALABLE_VALUETYPE,
+        (MVT::SimpleValueType)(MVT::LAST_INTEGER_SCALABLE_VALUETYPE + 1));
+    }
+    static mvt_range fp_wa_vector_valuetypes() {
+      return mvt_range(MVT::FIRST_FP_SCALABLE_VALUETYPE,
+        (MVT::SimpleValueType)(MVT::LAST_FP_SCALABLE_VALUETYPE + 1));
     }
     /// @}
   };

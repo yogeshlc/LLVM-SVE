@@ -69,6 +69,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Constants.h"
@@ -1667,6 +1668,7 @@ const SCEV *ScalarEvolution::getSignExtendExpr(const SCEV *Op,
       return getAddExpr(Ops, SCEV::FlagNSW);
     }
   }
+
   // If the input value is a chrec scev, and we can prove that the value
   // did not overflow the old, smaller, value, we can sign extend all of the
   // operands (often constants).  This allows analysis of something like
@@ -2035,6 +2037,9 @@ const SCEV *ScalarEvolution::getAddExpr(SmallVectorImpl<const SCEV *> &Ops,
   // Sort by complexity, this groups all similar expression types together.
   GroupByComplexity(Ops, &LI);
 
+  // Conservative check for reassociated operands from GroupByComplexity
+  bool IsReassociated = (Ops.size() > 2);
+
   Flags = StrengthenNoWrapFlags(this, scAddExpr, Ops, Flags);
 
   // If there are any constants, fold them together.
@@ -2301,10 +2306,23 @@ const SCEV *ScalarEvolution::getAddExpr(SmallVectorImpl<const SCEV *> &Ops,
 
       SmallVector<const SCEV *, 4> AddRecOps(AddRec->op_begin(),
                                              AddRec->op_end());
+      // The nsw flags can be propagated to the start value of the
+      // addrec iff the none of the add operands have been reassociated,
+      // e.g. in the expression: X*Y + j
+      // where:
+      // - the additions has nsw flag set
+      // - both X and Y are loop invariant
+      // - j is the loop variable {K,+,1}<nsw>
+      // the nsw flag can be propagated to the add of the start value.
+      //   {((X*Y)+K)<nsw>, +,1}<nsw>
+      SCEV::NoWrapFlags AddFlags = SCEV::FlagAnyWrap;
+      if (!IsReassociated)
+        AddFlags = AddRec->getNoWrapFlags(setFlags(SCEV::FlagNUW,
+                                                   SCEV::FlagNSW));
       // This follows from the fact that the no-wrap flags on the outer add
       // expression are applicable on the 0th iteration, when the add recurrence
       // will be equal to its start value.
-      AddRecOps[0] = getAddExpr(LIOps, Flags);
+      AddRecOps[0] = getAddExpr(LIOps, setFlags(Flags, AddFlags));
 
       // Build the new addrec. Propagate the NUW and NSW flags if both the
       // outer add and the inner addrec are guaranteed to have no overflow.
@@ -3239,6 +3257,15 @@ const SCEV *ScalarEvolution::getUMinExpr(const SCEV *LHS,
 }
 
 const SCEV *ScalarEvolution::getSizeOfExpr(Type *IntTy, Type *AllocTy) {
+
+  auto *VTy = dyn_cast<VectorType>(AllocTy);
+  if (VTy && VTy->isScalable()) {
+    Constant *C = ConstantExpr::getElementCount(IntTy, UndefValue::get(VTy));
+    const SCEV *S = getMulExpr(getSCEV(C),
+                               getSizeOfExpr(IntTy, VTy->getElementType()));
+    return S;
+  }
+
   // We can bypass creating a target-independent
   // constant expression and then folding it back into a ConstantInt.
   // This is just a compile-time optimization.
@@ -4568,6 +4595,27 @@ ScalarEvolution::getRange(const SCEV *S,
   }
 
   if (const SCEVUnknown *U = dyn_cast<SCEVUnknown>(S)) {
+    if (ConstantExpr *C = dyn_cast<ConstantExpr>(U->getValue())) {
+      if (C->getOpcode() == Instruction::ElementCount) {
+        if (auto *VTy = dyn_cast<VectorType>(C->getOperand(0)->getType())) {
+          // For vector type <N x M x ty> return the range of N x M.
+          unsigned N = 1;
+          unsigned M = VTy->getNumElements();
+
+          if (VTy->isScalable()) {
+            unsigned MinBitWidth = TTI.getRegisterBitWidth(true);
+            unsigned MaxBitWidth = TTI.getRegisterBitWidthUpperBound(true);
+            N = MaxBitWidth / MinBitWidth;
+          }
+
+          unsigned BitWidth = getTypeSizeInBits(S->getType());
+          APInt Min = APInt(BitWidth, M);
+          APInt Max = APInt(BitWidth, M * N);
+          return setRange(U, SignHint, ConstantRange(Min, Max+1));
+        }
+      }
+    }
+
     // Check if the IR explicitly contains !range metadata.
     Optional<ConstantRange> MDRange = GetRangeFromMetadata(U->getValue());
     if (MDRange.hasValue())
@@ -5203,6 +5251,24 @@ const SCEV *ScalarEvolution::createSCEV(Value *V) {
     return getZeroExtendExpr(getSCEV(U->getOperand(0)), U->getType());
 
   case Instruction::SExt:
+    if (auto *BO = dyn_cast<BinaryOperator>(U->getOperand(0))) {
+      // The NSW flag of a subtract does not always survive the conversion to
+      // A + (-1)*B.  By pushing sign extension onto its operands we are much
+      // more likely to preserve NSW and allow later AddRec optimisations.
+      //
+      // NOTE: This is effectively duplicating this logic from getSignExtend:
+      //   sext((A + B + ...)<nsw>) --> (sext(A) + sext(B) + ...)<nsw>
+      // but by that point the NSW information has potentially been lost.
+      if (BO->getOpcode() == Instruction::Sub) {
+        SCEV::NoWrapFlags Flags = getNoWrapFlagsFromUB(BO);
+        if (maskFlags(Flags, SCEV::FlagNSW) == SCEV::FlagNSW) {
+          Type *Ty = U->getType();
+          auto *V1 = getSignExtendExpr(getSCEV(BO->getOperand(0)), Ty);
+          auto *V2 = getSignExtendExpr(getSCEV(BO->getOperand(1)), Ty);
+          return getMinusSCEV(V1, V2, SCEV::FlagNSW);
+        }
+      }
+    }
     return getSignExtendExpr(getSCEV(U->getOperand(0)), U->getType());
 
   case Instruction::BitCast:
@@ -9488,8 +9554,8 @@ ScalarEvolution::SCEVCallbackVH::SCEVCallbackVH(Value *V, ScalarEvolution *se)
 
 ScalarEvolution::ScalarEvolution(Function &F, TargetLibraryInfo &TLI,
                                  AssumptionCache &AC, DominatorTree &DT,
-                                 LoopInfo &LI)
-    : F(F), TLI(TLI), AC(AC), DT(DT), LI(LI),
+                                 LoopInfo &LI, TargetTransformInfo &TTI)
+    : F(F), TLI(TLI), AC(AC), DT(DT), LI(LI), TTI(TTI),
       CouldNotCompute(new SCEVCouldNotCompute()),
       WalkingBEDominatingConds(false), ProvingSplitPredicate(false),
       ValuesAtScopes(64), LoopDispositions(64), BlockDispositions(64),
@@ -9512,7 +9578,8 @@ ScalarEvolution::ScalarEvolution(Function &F, TargetLibraryInfo &TLI,
 
 ScalarEvolution::ScalarEvolution(ScalarEvolution &&Arg)
     : F(Arg.F), HasGuards(Arg.HasGuards), TLI(Arg.TLI), AC(Arg.AC), DT(Arg.DT),
-      LI(Arg.LI), CouldNotCompute(std::move(Arg.CouldNotCompute)),
+      LI(Arg.LI), TTI(Arg.TTI),
+      CouldNotCompute(std::move(Arg.CouldNotCompute)),
       ValueExprMap(std::move(Arg.ValueExprMap)),
       WalkingBEDominatingConds(false), ProvingSplitPredicate(false),
       BackedgeTakenCounts(std::move(Arg.BackedgeTakenCounts)),
@@ -9993,7 +10060,7 @@ void ScalarEvolution::verify() const {
 
   // Gather stringified backedge taken counts for all loops using a fresh
   // ScalarEvolution object.
-  ScalarEvolution SE2(F, TLI, AC, DT, LI);
+  ScalarEvolution SE2(F, TLI, AC, DT, LI, TTI);
   for (LoopInfo::reverse_iterator I = LI.rbegin(), E = LI.rend(); I != E; ++I)
     getLoopBackedgeTakenCounts(*I, BackedgeDumpsNew, SE2);
 
@@ -10036,7 +10103,8 @@ ScalarEvolution ScalarEvolutionAnalysis::run(Function &F,
   return ScalarEvolution(F, AM.getResult<TargetLibraryAnalysis>(F),
                          AM.getResult<AssumptionAnalysis>(F),
                          AM.getResult<DominatorTreeAnalysis>(F),
-                         AM.getResult<LoopAnalysis>(F));
+                         AM.getResult<LoopAnalysis>(F),
+                         AM.getResult<TargetIRAnalysis>(F));
 }
 
 PreservedAnalyses
@@ -10051,6 +10119,7 @@ INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
 INITIALIZE_PASS_END(ScalarEvolutionWrapperPass, "scalar-evolution",
                     "Scalar Evolution Analysis", false, true)
 char ScalarEvolutionWrapperPass::ID = 0;
@@ -10064,7 +10133,8 @@ bool ScalarEvolutionWrapperPass::runOnFunction(Function &F) {
       F, getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(),
       getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F),
       getAnalysis<DominatorTreeWrapperPass>().getDomTree(),
-      getAnalysis<LoopInfoWrapperPass>().getLoopInfo()));
+      getAnalysis<LoopInfoWrapperPass>().getLoopInfo(),
+      getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F)));
   return false;
 }
 
@@ -10087,6 +10157,7 @@ void ScalarEvolutionWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequiredTransitive<LoopInfoWrapperPass>();
   AU.addRequiredTransitive<DominatorTreeWrapperPass>();
   AU.addRequiredTransitive<TargetLibraryInfoWrapperPass>();
+  AU.addRequiredTransitive<TargetTransformInfoWrapperPass>();
 }
 
 const SCEVPredicate *

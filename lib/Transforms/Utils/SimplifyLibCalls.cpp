@@ -1066,15 +1066,34 @@ Value *LibCallSimplifier::optimizePow(CallInst *CI, IRBuilder<> &B) {
     return Sel;
   }
 
-  if (Op2C->isExactlyValue(1.0)) // pow(x, 1.0) -> x
-    return Op1;
-  if (Op2C->isExactlyValue(2.0)) // pow(x, 2.0) -> x*x
-    return B.CreateFMul(Op1, Op1, "pow2");
-  if (Op2C->isExactlyValue(-1.0)) // pow(x, -1.0) -> 1.0/x
-    return B.CreateFDiv(ConstantFP::get(CI->getType(), 1.0), Op1, "powrecip");
+  if (Op2C->isExactlyValue(-0.5) &&
+      hasUnaryFloatFn(TLI, Op2->getType(), LibFunc::sqrt, LibFunc::sqrtf,
+                      LibFunc::sqrtl) &&
+      hasUnaryFloatFn(TLI, Op2->getType(), LibFunc::fabs, LibFunc::fabsf,
+                      LibFunc::fabsl)) {
+    // Expand pow(x, -0.5) to (x == -infinity ? +0.0 : 1/fabs(sqrt(x))).
+    // This is faster than calling pow, and still handles negative zero
+    // and negative infinity correctly.
+    // TODO: In fast-math mode, this could be just 1/sqrt(x).
+    // TODO: In finite-only mode, this could be just 1/fabs(sqrt(x)).
+    Value *PositiveZero = ConstantFP::get(CI->getType(), 0.0);
+    Value *NegInf = ConstantFP::getInfinity(CI->getType(), true);
+    Value *Sqrt = emitUnaryFloatFnCall(Op1, "sqrt", B, Callee->getAttributes());
+    Value *FAbs =
+        emitUnaryFloatFnCall(Sqrt, "fabs", B, Callee->getAttributes());
+    Value *FDiv =
+        B.CreateFDiv(ConstantFP::get(CI->getType(), 1.0), FAbs, "powrecipsqrt");
+    Value *FCmp = B.CreateFCmpOEQ(Op1, NegInf);
+    Value *Sel = B.CreateSelect(FCmp, PositiveZero, FDiv);
+    return Sel;
+  }
+
+  SmallVector<double,5> SpecialCases = { -1.0, 1.0, 2.0, 3.0 };
+  bool IsSpecialCase = std::any_of(SpecialCases.begin(), SpecialCases.end(),
+                                   [Op2C](double d){ return Op2C->isExactlyValue(d); });
 
   // In -ffast-math, generate repeated fmul instead of generating pow(x, n).
-  if (CI->hasUnsafeAlgebra()) {
+  if (CI->hasUnsafeAlgebra() || IsSpecialCase) {
     APFloat V = abs(Op2C->getValueAPF());
     // We limit to a max of 7 fmul(s). Thus max exponent is 32.
     // This transformation applies to integer exponents only.
@@ -1098,7 +1117,8 @@ Value *LibCallSimplifier::optimizePow(CallInst *CI, IRBuilder<> &B) {
     if (Op2C->isNegative())
       FMul = B.CreateFDiv(ConstantFP::get(CI->getType(), 1.0), FMul);
     return FMul;
-  }
+  } else if (Op2C->isExactlyValue(4.0)) // pow(x, 4.0) -> x*x*x*x
+    return B.CreateFMul(B.CreateFMul(B.CreateFMul(Op1, Op1), Op1), Op1, "pow4");
 
   return nullptr;
 }
@@ -2152,6 +2172,7 @@ void LibCallSimplifier::replaceAllUsesWith(Instruction *I, Value *With) {
 //   * lround(cnst) -> cnst'
 //
 // pow, powf, powl:
+//   * pow(exp(x),y)  -> exp(x*y)
 //   * pow(sqrt(x),y) -> pow(x,y*0.5)
 //   * pow(pow(x,y),z)-> pow(x,y*z)
 //
@@ -2166,6 +2187,9 @@ void LibCallSimplifier::replaceAllUsesWith(Instruction *I, Value *With) {
 //   * sqrt(expN(x))  -> expN(x*0.5)
 //   * sqrt(Nroot(x)) -> pow(x,1/(2*N))
 //   * sqrt(pow(x,y)) -> pow(|x|,y*0.5)
+//
+// tan, tanf, tanl:
+//   * tan(atan(x)) -> x
 //
 // trunc, truncf, truncl:
 //   * trunc(cnst) -> cnst'

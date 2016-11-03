@@ -97,6 +97,10 @@ ISD::CondCode getFCmpCodeWithoutNaN(ISD::CondCode CC);
 ///
 ISD::CondCode getICmpCondCode(ICmpInst::Predicate Pred);
 
+/// getTestCondCode - Return the ISD condition code corresponding to
+/// the given LLVM IR boolean vector test predicate.
+ISD::TestCode getTestCondCode(TestInst::Predicate Pred);
+
 /// Test if the given instruction is in a position to be optimized
 /// with a tail-call. This roughly means that it's in a block with
 /// a return and there's nothing that needs to be scheduled

@@ -71,7 +71,8 @@ struct SimpleValue {
            isa<GetElementPtrInst>(Inst) || isa<CmpInst>(Inst) ||
            isa<SelectInst>(Inst) || isa<ExtractElementInst>(Inst) ||
            isa<InsertElementInst>(Inst) || isa<ShuffleVectorInst>(Inst) ||
-           isa<ExtractValueInst>(Inst) || isa<InsertValueInst>(Inst);
+           isa<ExtractValueInst>(Inst) || isa<InsertValueInst>(Inst) ||
+           isa<SeriesVectorInst>(Inst);
   }
 };
 }
@@ -127,7 +128,7 @@ unsigned DenseMapInfo<SimpleValue>::getHashValue(SimpleValue Val) {
   assert((isa<CallInst>(Inst) || isa<BinaryOperator>(Inst) ||
           isa<GetElementPtrInst>(Inst) || isa<SelectInst>(Inst) ||
           isa<ExtractElementInst>(Inst) || isa<InsertElementInst>(Inst) ||
-          isa<ShuffleVectorInst>(Inst)) &&
+          isa<ShuffleVectorInst>(Inst) || isa<SeriesVectorInst>(Inst)) &&
          "Invalid/unknown instruction");
 
   // Mix in the opcode.

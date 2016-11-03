@@ -966,7 +966,9 @@ Instruction *InstCombiner::FoldGEPICmp(GEPOperator *GEPLHS, Value *RHS,
           }
 
       // If all indices are the same, just compare the base pointers.
-      if (IndicesTheSame)
+      if (IndicesTheSame &&
+            (GEPLHS->getOperand(0)->getType()->isVectorTy() ==
+             GEPLHS->getType()->isVectorTy()))
         return new ICmpInst(Cond, GEPLHS->getOperand(0), GEPRHS->getOperand(0));
 
       // If we're comparing GEPs with two base pointers that only differ in type

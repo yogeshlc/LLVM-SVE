@@ -1490,6 +1490,28 @@ int X86TTIImpl::getGatherScatterOpCost(unsigned Opcode, Type *SrcVTy,
   return getGSVectorCost(Opcode, SrcVTy, Ptr, Alignment, AddressSpace);
 }
 
+unsigned X86TTIImpl::getVectorMemoryOpCost(unsigned Opcode, Type *Src,
+                                           Value *Ptr, unsigned Alignment,
+                                           unsigned AddressSpace,
+                                           const MemAccessInfo &Info) {
+  unsigned Cost;
+
+  if (Info.isUniform())
+    // Broadcast cost handled separately.
+    // TODO: Maybe it shouldn't be?
+    Cost = getMemoryOpCost(Opcode, Src->getScalarType(),
+                           Alignment, AddressSpace);
+  else if (Info.isStrided() && std::abs(Info.getStride())==1) {
+    if (Info.isMasked())
+      Cost = getMaskedMemoryOpCost(Opcode, Src, Alignment, AddressSpace);
+    else
+      Cost = getMemoryOpCost(Opcode, Src, Alignment, AddressSpace);
+  } else
+    Cost = getGatherScatterOpCost(Opcode, Src, Ptr, Info.isMasked(), Alignment);
+
+  return Cost;
+}
+
 bool X86TTIImpl::isLegalMaskedLoad(Type *DataTy) {
   Type *ScalarTy = DataTy->getScalarType();
   int DataWidth = isa<PointerType>(ScalarTy) ?

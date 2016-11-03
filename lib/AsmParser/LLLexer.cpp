@@ -524,6 +524,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(undef);
   KEYWORD(null);
   KEYWORD(none);
+  KEYWORD(as);
   KEYWORD(to);
   KEYWORD(caller);
   KEYWORD(within);
@@ -677,10 +678,12 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(sge); KEYWORD(ult); KEYWORD(ugt); KEYWORD(ule); KEYWORD(uge);
   KEYWORD(oeq); KEYWORD(one); KEYWORD(olt); KEYWORD(ogt); KEYWORD(ole);
   KEYWORD(oge); KEYWORD(ord); KEYWORD(uno); KEYWORD(ueq); KEYWORD(une);
+  KEYWORD(all); KEYWORD(first); KEYWORD(last);
 
   KEYWORD(xchg); KEYWORD(nand); KEYWORD(max); KEYWORD(min); KEYWORD(umax);
   KEYWORD(umin);
 
+  KEYWORD(n);
   KEYWORD(x);
   KEYWORD(blockaddress);
 
@@ -734,7 +737,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   INSTKEYWORD(urem,  URem); INSTKEYWORD(srem,  SRem); INSTKEYWORD(frem,  FRem);
   INSTKEYWORD(shl,   Shl);  INSTKEYWORD(lshr,  LShr); INSTKEYWORD(ashr,  AShr);
   INSTKEYWORD(and,   And);  INSTKEYWORD(or,    Or);   INSTKEYWORD(xor,   Xor);
-  INSTKEYWORD(icmp,  ICmp); INSTKEYWORD(fcmp,  FCmp);
+  INSTKEYWORD(icmp,  ICmp); INSTKEYWORD(fcmp,  FCmp); INSTKEYWORD(test,  Test);
 
   INSTKEYWORD(phi,         PHI);
   INSTKEYWORD(call,        Call);
@@ -775,6 +778,10 @@ lltok::Kind LLLexer::LexIdentifier() {
   INSTKEYWORD(extractvalue,   ExtractValue);
   INSTKEYWORD(insertvalue,    InsertValue);
   INSTKEYWORD(landingpad,     LandingPad);
+  INSTKEYWORD(elementcount,   ElementCount);
+  INSTKEYWORD(seriesvector,   SeriesVector);
+  INSTKEYWORD(propff,         PropFF);
+
   INSTKEYWORD(cleanupret,     CleanupRet);
   INSTKEYWORD(catchret,       CatchRet);
   INSTKEYWORD(catchswitch,  CatchSwitch);

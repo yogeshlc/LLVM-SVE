@@ -1729,6 +1729,22 @@ public:
   }
 };
 
+class TestCodeSDNode : public SDNode {
+  ISD::TestCode Condition;
+  friend class SelectionDAG;
+  explicit TestCodeSDNode(ISD::TestCode Cond)
+    : SDNode(ISD::TESTCODE, 0, DebugLoc(), getSDVTList(MVT::Other)),
+      Condition(Cond) {
+  }
+public:
+
+  ISD::TestCode get() const { return Condition; }
+
+  static bool classof(const SDNode *N) {
+    return N->getOpcode() == ISD::TESTCODE;
+  }
+};
+
 /// NOTE: avoid using this node as this may disappear in the
 /// future and most targets don't support it.
 class CvtRndSatSDNode : public SDNode {
@@ -1944,9 +1960,16 @@ public:
 class MaskedGatherSDNode : public MaskedGatherScatterSDNode {
 public:
   friend class SelectionDAG;
-  MaskedGatherSDNode(unsigned Order, DebugLoc dl, SDVTList VTs, EVT MemVT,
-                     MachineMemOperand *MMO)
-      : MaskedGatherScatterSDNode(ISD::MGATHER, Order, dl, VTs, MemVT, MMO) {}
+  MaskedGatherSDNode(unsigned Order, DebugLoc dl, SDVTList VTs,
+                     ISD::LoadExtType ETy, EVT MemVT, MachineMemOperand *MMO)
+    : MaskedGatherScatterSDNode(ISD::MGATHER, Order, dl, VTs, MemVT, MMO) {
+    SubclassData |= (unsigned short)ETy;
+  }
+
+  ISD::LoadExtType getExtensionType() const {
+    return ISD::LoadExtType(SubclassData & 3);
+  }
+  const SDValue &getSrc0() const { return getValue(); }
 
   static bool classof(const SDNode *N) {
     return N->getOpcode() == ISD::MGATHER;
@@ -1959,9 +1982,16 @@ class MaskedScatterSDNode : public MaskedGatherScatterSDNode {
 
 public:
   friend class SelectionDAG;
-  MaskedScatterSDNode(unsigned Order, DebugLoc dl, SDVTList VTs, EVT MemVT,
-                      MachineMemOperand *MMO)
-      : MaskedGatherScatterSDNode(ISD::MSCATTER, Order, dl, VTs, MemVT, MMO) {}
+  MaskedScatterSDNode(unsigned Order, DebugLoc dl, SDVTList VTs, bool isTrunc,
+                      EVT MemVT, MachineMemOperand *MMO)
+    : MaskedGatherScatterSDNode(ISD::MSCATTER, Order, dl, VTs, MemVT, MMO) {
+    SubclassData |= (unsigned short)isTrunc;
+  }
+
+  /// Return true if the op does a truncation before store.
+  /// For integers this is the same as doing a TRUNCATE and storing the result.
+  /// For floats, it is the same as doing an FP_ROUND and storing the result.
+  bool isTruncatingStore() const { return SubclassData & 1; }
 
   static bool classof(const SDNode *N) {
     return N->getOpcode() == ISD::MSCATTER;

@@ -92,6 +92,8 @@
 #include "AArch64MachineFunctionInfo.h"
 #include "AArch64Subtarget.h"
 #include "AArch64TargetMachine.h"
+#include "MCTargetDesc/AArch64AddressingModes.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -127,6 +129,7 @@ bool AArch64FrameLowering::canUseRedZone(const MachineFunction &MF) const {
   const AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
   unsigned NumBytes = AFI->getLocalStackSize();
 
+  // TODO: Add check for non-empty StackRegions?
   return !(MFI->hasCalls() || hasFP(MF) || NumBytes > 128);
 }
 
@@ -310,6 +313,9 @@ bool AArch64FrameLowering::shouldCombineCSRLocalStackBump(
   if (canUseRedZone(MF))
     return false;
 
+  if (hasVarSizedRegions(MF))
+    return false;
+
   return true;
 }
 
@@ -456,17 +462,48 @@ void AArch64FrameLowering::emitPrologue(MachineFunction &MF,
   }
 
   auto CSStackSize = AFI->getCalleeSavedStackSize();
+  const SmallVectorImpl<StackRegion *> &StackRegions = MFI->getStackRegions();
+  assert(StackRegions.size() == 2 &&
+         "Two StackRegions expected for SVE predicates and vectors");
+
+  SVEVecStackRegion *Pred =
+      static_cast<SVEVecStackRegion *>(StackRegions[0]);
+  SVEVecStackRegion *Vec =
+      static_cast<SVEVecStackRegion *>(StackRegions[1]);
+
+  // Insert SVE Stack Region before local region
+  uint64_t AddedSize = 0;
+  Vec->emitPrologue(MF, MBB, MBBI, DL, AddedSize, AArch64::SP,
+                    Vec->getRegionSize());
+  Pred->emitPrologue(MF, MBB, MBBI, DL, AddedSize, AArch64::SP,
+                     Pred->getRegionSize());
+
+  // If the functions above did not allocate all the space, do it here.
+  if (AddedSize)
+    SVEVecStackRegion::adjustRegBySVE(
+        MF, MBB, MBBI, DL, AArch64::SP, AddedSize, /*IsPositiveOffset=*/false,
+        /*Dst=*/AArch64::SP);
+
   // All of the remaining stack allocations are for locals.
   AFI->setLocalStackSize(NumBytes - CSStackSize);
 
+  // EXTRASTACKREGION: The extra region overlaps with the area to save the
+  // previous frame pointer and link register, so we need to reduce the change
+  // to the stack pointer such that the last store will overlap.
+  int OverlapOffset = 0;
+  if (hasFP(MF))
+    for (unsigned i = 0, e = MFI->getObjectIndexEnd(); i != e; ++i)
+      if (MFI->getObjectRegion(i) != nullptr)
+        OverlapOffset = 16;
+
   bool CombineSPBump = shouldCombineCSRLocalStackBump(MF, NumBytes);
   if (CombineSPBump) {
-    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::SP, -NumBytes, TII,
-                    MachineInstr::FrameSetup);
+    emitFrameOffset(MBB, MBBI, DL, AArch64::SP, AArch64::SP,
+                    -NumBytes + OverlapOffset, TII, MachineInstr::FrameSetup);
     NumBytes = 0;
   } else if (CSStackSize != 0) {
     MBBI = convertCalleeSaveRestoreToSPPrePostIncDec(MBB, MBBI, DL, TII,
-                                                     -CSStackSize);
+                                                 -CSStackSize + OverlapOffset);
     NumBytes -= CSStackSize;
   }
   assert(NumBytes >= 0 && "Negative stack allocation size!?");
@@ -711,9 +748,20 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
   auto CSStackSize = AFI->getCalleeSavedStackSize();
   bool CombineSPBump = shouldCombineCSRLocalStackBump(MF, NumBytes);
 
+  // EXTRASTACKREGION: The extra region overlaps with the area to save the
+  // previous frame pointer and link register, so we need to reduce the change
+  // to the stack pointer to match the change from the spill code above. The
+  // first load will be in the overlap area.
+  int OverlapOffset = 0;
+  if (hasFP(MF))
+    for (unsigned i = 0, e = MFI->getObjectIndexEnd(); i != e; ++i)
+      if (MFI->getObjectRegion(i) != nullptr)
+        OverlapOffset = 16;
+
   if (!CombineSPBump && CSStackSize != 0)
     convertCalleeSaveRestoreToSPPrePostIncDec(
-        MBB, std::prev(MBB.getFirstTerminator()), DL, TII, CSStackSize);
+        MBB, std::prev(MBB.getFirstTerminator()), DL, TII,
+                       CSStackSize - OverlapOffset);
 
   // Move past the restores of the callee-saved registers.
   MachineBasicBlock::iterator LastPopI = MBB.getFirstTerminator();
@@ -730,7 +778,7 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
   // If there is a single SP update, insert it before the ret and we're done.
   if (CombineSPBump) {
     emitFrameOffset(MBB, MBB.getFirstTerminator(), DL, AArch64::SP, AArch64::SP,
-                    NumBytes + ArgumentPopSize, TII,
+                    NumBytes + ArgumentPopSize - OverlapOffset, TII,
                     MachineInstr::FrameDestroy);
     return;
   }
@@ -753,8 +801,9 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
                     StackRestoreBytes, TII, MachineInstr::FrameDestroy);
     // If we were able to combine the local stack pop with the argument pop,
     // then we're done.
-    if (NoCalleeSaveRestore || ArgumentPopSize == 0)
-      return;
+    if (!hasVarSizedRegions(MF))
+      if (NoCalleeSaveRestore || ArgumentPopSize == 0)
+        return;
     NumBytes = 0;
   }
 
@@ -775,6 +824,29 @@ void AArch64FrameLowering::emitEpilogue(MachineFunction &MF,
   if (ArgumentPopSize)
     emitFrameOffset(MBB, MBB.getFirstTerminator(), DL, AArch64::SP, AArch64::SP,
                     ArgumentPopSize, TII, MachineInstr::FrameDestroy);
+
+  // Remove the SVE region as well
+  const SmallVectorImpl<StackRegion *> &StackRegions = MFI->getStackRegions();
+  assert(StackRegions.size() == 2 && "Two StackRegions expected for SVE"
+                                     "predicates and vectors");
+
+  SVEVecStackRegion *Pred =
+      static_cast<SVEVecStackRegion *>(StackRegions[0]);
+  SVEVecStackRegion *Vec =
+      static_cast<SVEVecStackRegion *>(StackRegions[1]);
+
+  uint64_t AddedSize = 0;
+  unsigned Basereg = AArch64::SP;
+  MachineBasicBlock::iterator TermI = MBB.getFirstTerminator();
+
+  Pred->emitEpilogue(MF, MBB, TermI, DL, AddedSize, Basereg, Pred->getRegionSize());
+  Vec->emitEpilogue(MF, MBB, TermI, DL, AddedSize, Basereg, Vec->getRegionSize());
+
+  // Deallocate SVE region (if not completed yet)
+  if (Basereg != AArch64::SP || AddedSize)
+    SVEVecStackRegion::adjustRegBySVE(MF, MBB, TermI, DL, Basereg, AddedSize,
+                                          /*IsPositiveOffset=*/true,
+                                          /*Dst=*/AArch64::SP);
 }
 
 /// getFrameIndexReference - Provide a base+offset reference to an FI slot for
@@ -797,6 +869,10 @@ int AArch64FrameLowering::resolveFrameIndexReference(const MachineFunction &MF,
   int FPOffset = MFI->getObjectOffset(FI) + 16;
   int Offset = MFI->getObjectOffset(FI) + MFI->getStackSize();
   bool isFixed = MFI->isFixedObjectIndex(FI);
+
+  if (StackRegion *SR = MFI->getObjectRegion(FI))
+    return static_cast<SVEVecStackRegion *>(SR)
+        ->resolveFrameIndexReference(MF, FI, FrameReg);
 
   // Use frame pointer to reference fixed objects. Use it for locals if
   // there are VLAs or a dynamically realigned SP (and thus the SP isn't
@@ -821,8 +897,8 @@ int AArch64FrameLowering::resolveFrameIndexReference(const MachineFunction &MF,
       // using the FP regardless, though, as the SP offset is unknown
       // and we don't have a base pointer available. If an offset is
       // available via the FP and the SP, use whichever is closest.
-      if (PreferFP || MFI->hasVarSizedObjects() || FPOffset >= 0 ||
-          (FPOffset >= -256 && Offset > -FPOffset))
+      if (PreferFP || MFI->hasVarSizedObjects() ||
+          FPOffset >= 0 || (FPOffset >= -256 && Offset > -FPOffset))
         UseFP = true;
     }
   }
@@ -959,11 +1035,21 @@ static void computeCalleeSaveRegisterPairs(
 
 bool AArch64FrameLowering::spillCalleeSavedRegisters(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
-    const std::vector<CalleeSavedInfo> &CSI,
+    const std::vector<CalleeSavedInfo> &CSIWithSVE,
     const TargetRegisterInfo *TRI) const {
   MachineFunction &MF = *MBB.getParent();
+  MachineFrameInfo *MFI = MF.getFrameInfo();
   const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
   DebugLoc DL;
+
+  // Create a temporary list of CSRs, where we have removed the SVE CSRs.
+  std::vector<CalleeSavedInfo> CSI;
+  for (unsigned i = 0; i < CSIWithSVE.size(); ++i) {
+    if (MFI->getStackRegionToHandleCSR(CSIWithSVE[i].getReg()) != nullptr)
+      continue;
+    CSI.push_back(CSIWithSVE[i]);
+  }
+
   SmallVector<RegPairInfo, 8> RegPairs;
 
   computeCalleeSaveRegisterPairs(MF, CSI, TRI, RegPairs);
@@ -1019,10 +1105,20 @@ bool AArch64FrameLowering::spillCalleeSavedRegisters(
 
 bool AArch64FrameLowering::restoreCalleeSavedRegisters(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
-    const std::vector<CalleeSavedInfo> &CSI,
+    const std::vector<CalleeSavedInfo> &CSIWithSVE,
     const TargetRegisterInfo *TRI) const {
   MachineFunction &MF = *MBB.getParent();
+  MachineFrameInfo *MFI = MF.getFrameInfo();
   const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+
+  // Create a temporary list of CSRs, where we have removed the SVE CSRs.
+  std::vector<CalleeSavedInfo> CSI;
+  for (unsigned i = 0; i < CSIWithSVE.size(); ++i) {
+    if (MFI->getStackRegionToHandleCSR(CSIWithSVE[i].getReg()) != nullptr)
+      continue;
+    CSI.push_back(CSIWithSVE[i]);
+  }
+
   DebugLoc DL;
   SmallVector<RegPairInfo, 8> RegPairs;
 
@@ -1036,6 +1132,10 @@ bool AArch64FrameLowering::restoreCalleeSavedRegisters(
     RegPairInfo RPI = *RPII;
     unsigned Reg1 = RPI.Reg1;
     unsigned Reg2 = RPI.Reg2;
+
+    // [SVE] Only handle non-SVE spills here
+    if (MFI->getStackRegionToHandleCSR(Reg1))
+      continue;
 
     // Issue sequence of restores for cs regs. The last restore may be converted
     // to a post-increment load later by emitEpilogue if the callee-save stack
@@ -1085,9 +1185,11 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
     return;
 
   TargetFrameLowering::determineCalleeSaves(MF, SavedRegs, RS);
+
   const AArch64RegisterInfo *RegInfo = static_cast<const AArch64RegisterInfo *>(
       MF.getSubtarget().getRegisterInfo());
   AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
+  MachineFrameInfo *MFI = MF.getFrameInfo();
   unsigned UnspilledCSGPR = AArch64::NoRegister;
   unsigned UnspilledCSGPRPaired = AArch64::NoRegister;
 
@@ -1103,6 +1205,14 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
 
   bool ExtraCSSpill = false;
   const MCPhysReg *CSRegs = RegInfo->getCalleeSavedRegs(&MF);
+  // [SVE] SVE saves are handled separately by SVEVecStackRegion class
+  for (unsigned i = 0; CSRegs[i]; ++i) {
+    const unsigned Reg = CSRegs[i];
+    if (MFI->getStackRegionToHandleCSR(Reg) != nullptr)
+      SavedRegs.reset(Reg);
+  }
+
+
   // Figure out which callee-saved registers to save/restore.
   for (unsigned i = 0; CSRegs[i]; ++i) {
     const unsigned Reg = CSRegs[i];
@@ -1141,7 +1251,7 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
 
   // If any callee-saved registers are used, the frame cannot be eliminated.
   unsigned NumRegsSpilled = SavedRegs.count();
-  bool CanEliminateFrame = NumRegsSpilled == 0;
+  bool CanEliminateFrame = (NumRegsSpilled == 0) && !hasVarSizedRegions(MF);
 
   // FIXME: Set BigStack if any stack slot references may be out of range.
   // For now, just conservatively guestimate based on unscaled indexing
@@ -1149,10 +1259,27 @@ void AArch64FrameLowering::determineCalleeSaves(MachineFunction &MF,
   // realistically that's not a big deal at this stage of the game.
   // The CSR spill slots have not been allocated yet, so estimateStackSize
   // won't include them.
-  MachineFrameInfo *MFI = MF.getFrameInfo();
   unsigned CFSize = MFI->estimateStackSize(MF) + 8 * NumRegsSpilled;
   DEBUG(dbgs() << "Estimated stack frame size: " << CFSize << " bytes.\n");
-  bool BigStack = (CFSize >= 256);
+
+  // In case of SVE regions, we know a scratch register is needed
+  // to calculate the address of a SVE vector on the stack when:
+  //  - There is no framepointer and accessing a SVE vector requires
+  //    first calculating the base of the SVE region from SP.
+  //  - There *is* a framepointer and we need to step over the
+  //    16 byte framerecord (x29,x30) just above FP.
+  //  - The address of the furthest SVE vector would not fit the
+  //    immediate field.
+  uint64_t StackRegionsSize = 0;
+  for (StackRegion *SR : MFI->getStackRegions()) {
+    auto *SSR = static_cast<SVEVecStackRegion*>(SR);
+    StackRegionsSize += SSR->estimateRegionSize(MF);
+  }
+
+  bool BigStack = (CFSize >= 256) ||
+                  ((StackRegionsSize/16) > 31) ||
+                  (hasFP(MF) && StackRegionsSize > 0) ||
+                  (!hasFP(MF) && StackRegionsSize > 0 && CFSize > 0);
   if (BigStack || !CanEliminateFrame || RegInfo->cannotEliminateFrame(MF))
     AFI->setHasStackFrame(true);
 
@@ -1196,4 +1323,401 @@ bool AArch64FrameLowering::enableStackSlotScavenging(
     const MachineFunction &MF) const {
   const AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
   return AFI->hasCalleeSaveStackFreeSpace();
+}
+
+bool AArch64FrameLowering::hasVarSizedRegions(const MachineFunction &MF) const {
+  const SmallVectorImpl<StackRegion *> &StackRegions =
+      MF.getFrameInfo()->getStackRegions();
+
+  if (StackRegions.size() == 0)
+    return false;
+
+  return StackRegions[0]->maybeUsed() || StackRegions[1]->maybeUsed();
+}
+
+void AArch64FrameLowering::registerStackRegions(MachineFunction &MF) const {
+  MachineFrameInfo *MFI = MF.getFrameInfo();
+
+  SVEVecStackRegion *Pred =
+      new SVEVecStackRegion(/*IsPredicateRegion=*/true,
+                              /*Name=*/"SVE Pred");
+  SVEVecStackRegion *Vec =
+      new SVEVecStackRegion(/*IsPredicateRegion=*/false,
+                              /*Name=*/"SVE Vec");
+
+  // [SVE] Register a new StackRegion handler for SVE
+  MFI->addStackRegion(Pred);
+  MFI->addStackRegion(Vec);
+}
+
+void AArch64FrameLowering::layoutStackRegions(MachineFunction &MF) const {
+  const SmallVectorImpl<StackRegion *> &StackRegions =
+      MF.getFrameInfo()->getStackRegions();
+
+  assert(StackRegions.size() == 2 && "Two StackRegions expected for SVE"
+                                     "predicates and vectors");
+  SVEVecStackRegion *Pred =
+      static_cast<SVEVecStackRegion *>(StackRegions[0]);
+  SVEVecStackRegion *Vec =
+      static_cast<SVEVecStackRegion *>(StackRegions[1]);
+
+  const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
+
+  // EXTRASTACKREGION: We allocate an extra empty VL sized spill slot which is
+  // overlaid by the frame-record (x29, x30) to prevent having to materialise
+  // the base of the SVE region for each spill/fill by calculating (FP + 16).
+  // From this, we can just access any SVE object directly from:
+  //
+  //      FP + (#offset + 1) * VL
+  //
+  // Note that this favours performance over stack size, which may change in
+  // the future. The offset starts at (n x) 16 bytes and requires the size of
+  // a full SVE vector, since the FP needs to be 16 byte aligned.
+  //
+  // If this is a leaf function (doesn't have a frame pointer) then
+  // we don't need to perform this hack.
+  //
+  // See also AArch64RegisterInfo::eliminateFrameIndex
+
+  bool HasFP = TFI->hasFP(MF);
+
+  uint64_t Offset = HasFP ? 16 : 0;
+  Offset  = Pred->layoutRegion(MF, Offset, 16);
+  if (HasFP && (Pred->getRegionSize() > 0)) {
+    Pred->setRegionSize(Pred->getRegionSize() + 16);
+  }
+  Vec->layoutRegion(MF, Offset, 16);
+  if (HasFP && (Pred->getRegionSize() == 0 && Vec->getRegionSize() > 0))
+    Vec->setRegionSize(Vec->getRegionSize() + 16);
+}
+
+//===-----------------------------------------------------------===//
+//         SVEVecStackRegion utility functions
+//===-----------------------------------------------------------===//
+
+unsigned SVEVecStackRegion::adjustRegBySVE(MachineFunction &MF,
+                                               MachineBasicBlock &MBB,
+                                               MachineBasicBlock::iterator MBBI,
+                                               DebugLoc DL,
+                                               unsigned Basereg, uint64_t Size,
+                                               bool IsPositiveOffset,
+                                               unsigned Dst) {
+  // Instead of directly updating the Basereg into SP, we can also create
+  // a SP' that contains the updated Basereg+Offset value. This is used
+  // in the epilogue if BP+offset cannot be reached with an
+  // immediate.
+  if (!Dst) {
+    auto *TRI = MF.getRegInfo().getTargetRegisterInfo();
+    Dst = MF.getRegInfo().createVirtualRegister(&AArch64::GPR64RegClass);
+    DEBUG(dbgs() << "TMP " << PrintReg(Dst, TRI)
+                 << " = " << PrintReg(Basereg, TRI)
+                 << (IsPositiveOffset ? " + " : " - ") << Size << "\n");
+  }
+
+  // max(abs(offset)) encodable in simm6 field
+  uint64_t MaxOffset = IsPositiveOffset ? 31 : 32;
+
+  const AArch64InstrInfo *TII =
+      static_cast<const AArch64InstrInfo *>(MF.getSubtarget().getInstrInfo());
+
+  assert(Size % 16 == 0 && "The number of elements should be aligned "
+                           "to SVE vector length");
+
+  // This function only handles function operating on VL
+  Size = Size / 16;
+
+  // Create copy when Size == 0.
+  if (Basereg != Dst && Size == 0) {
+    BuildMI(MBB, MBBI, DL, TII->get(AArch64::ADDXri), Dst)
+        .addReg(Basereg)
+        .addImm(0)
+        .addImm(0);
+  }
+  // If Size is small enough, we can suffice with 1 or 2 'addvlx'
+  // instructions that take immediates, rather than filling registers
+  // and using a MADD instruction.
+  else {
+    // Set parameters
+    int64_t Sign = IsPositiveOffset ? 1 : -1;
+    const llvm::MCInstrDesc &op = TII->get(AArch64::ADDVL_XXI);
+
+    // Loop while subtracting chunks of immediate from Offset,
+    // and using them for addvl/addpl, until offset is 0.
+    while (Size > 0) {
+      uint64_t Subtr = std::min(Size, MaxOffset);
+      BuildMI(MBB, MBBI, DL, op, Dst).addReg(Basereg).addImm(Sign * Subtr);
+      Basereg = Dst;
+      Size -= Subtr;
+    }
+  }
+
+  return Dst;
+}
+
+//===-----------------------------------------------------------===//
+//               SVEVecStackRegion implementation
+//===-----------------------------------------------------------===//
+bool SVEVecStackRegion::allocatesRegClass(
+    const TargetRegisterClass *c) const {
+  if (IsPredicateRegion)
+    return AArch64::PPRRegClass.hasSubClassEq(c);
+  else
+    return AArch64::ZPRRegClass.hasSubClassEq(c) ||
+           AArch64::ZPR2RegClass.hasSubClassEq(c) ||
+           AArch64::ZPR3RegClass.hasSubClassEq(c) ||
+           AArch64::ZPR4RegClass.hasSubClassEq(c);
+}
+
+bool SVEVecStackRegion::allocatesType(const Type *Type) const {
+  // Support for array like structs.
+  if (auto ST = dyn_cast<StructType>(Type))
+    if (std::equal(ST->element_begin(), ST->element_end(), ST->element_begin()))
+      return (ST->getNumElements() != 0) ? allocatesType(*ST->element_begin())
+                                         : false;
+
+  if (isa<ArrayType>(Type))
+    return allocatesType(cast<ArrayType>(Type)->getElementType());
+
+  const VectorType *VT = dyn_cast<const VectorType>(Type);
+  if (IsPredicateRegion)
+    return VT && VT->isScalable() && (VT->getBitWidth() % 128 > 0);
+  else
+    return VT && VT->isScalable() && (VT->getBitWidth() % 128 == 0);
+}
+
+// Get a quick estimate without all details of exact layout
+uint64_t SVEVecStackRegion::estimateRegionSize(const MachineFunction &Fn) {
+  const MachineFrameInfo *MFI = Fn.getFrameInfo();
+  const AArch64RegisterInfo *RegInfo = static_cast<const AArch64RegisterInfo *>(
+      Fn.getSubtarget().getRegisterInfo());
+
+  // First all objects
+  uint64_t Result = 0;
+  for (unsigned I = 0, E = MFI->getObjectIndexEnd(); I != E; ++I) {
+    if (MFI->getObjectRegion(I) == this)
+      Result += MFI->getObjectSize(I);
+  }
+
+  // Then all Callee Saved Registers
+  const MCPhysReg *CSRegs = RegInfo->getCalleeSavedRegs(&Fn);
+  for (unsigned I = 0; CSRegs[I]; I += 1) {
+    if (!Fn.getRegInfo().isPhysRegModified(CSRegs[I]))
+      continue;
+
+    if (MFI->getStackRegionToHandleCSR(CSRegs[I]) == this)
+      Result += this->Scale;
+  }
+
+  return Result;
+}
+
+uint64_t SVEVecStackRegion::layoutRegion(MachineFunction &Fn,
+                                           uint64_t StartOffset,
+                                           unsigned Align) {
+  MachineFrameInfo *MFI = Fn.getFrameInfo();
+  const MachineRegisterInfo *MRI = &Fn.getRegInfo();
+
+  // Early exit if this StackRegion will never be used
+  if (!MaybeUsed) {
+    CSRs.clear();
+    setRegionSize(0);
+    return StartOffset;
+  }
+
+  // Do not save registers if they are not used
+  for (std::vector<unsigned>::iterator i = CSRs.begin(); i != CSRs.end();) {
+    if (!MRI->isPhysRegModified(*i))
+      i = CSRs.erase(i);
+    else
+      ++i; // advance loop
+  }
+
+  // Count the number of locals/spills to be allocated to this region
+  unsigned Count = 0;
+  for (unsigned i = 0, e = MFI->getObjectIndexEnd(); i != e; ++i) {
+    if (MFI->getObjectRegion(i) == this) {
+      // Normalize and align object size to #predicates.
+      unsigned ObjSize = MFI->getObjectSize(i);
+
+      // Assign subsequent offsets to StackObjects for this region
+      // e.g. [ 0, 1, 2, ... K ]    where K is number of SVE locals
+      unsigned Offset = StartOffset + Count;
+      // Align element if needed.
+      unsigned Alignment = MFI->getObjectAlignment(i);
+      unsigned Padding = 0;
+      if (!MFI->getObjectAllocation(i)) {
+        // for ZPR2,3,4 register classes, the spill/fill instructions have a
+        // very restricted immediate field, of multiples of the object size (eg.
+        // for st3, offset must multiples of 3 * vector length).  Add padding to
+        // ensure the stack offset naturally fulfils this restriction.
+        // We should take care not to do this when this object is from an alloca
+        // instruction, for e.g. arrays of SVE vectors we only want to align to
+        // the natural alignment (see below)
+        if ((ObjSize > Alignment) && (Offset % ObjSize > 0))
+          Padding = ObjSize - (Offset % ObjSize);
+      } else if (Offset % Alignment > 0)
+        // Align to natural alignment of object
+        Padding = ObjSize - (Offset % Alignment);
+
+      MFI->setObjectOffset(i, Offset + Padding);
+      Count += ObjSize + Padding;
+    }
+  }
+
+  // Saves are never referenced in user code, only in the epilogue
+  // and prologue, so we don't need to give offsets. We only need
+  // to count the number of saves that we need to allocate for
+  // the save area.
+  Count += CSRs.size() * this->Scale;
+
+  // Align to 'Align' elements if needed.
+  if (Count % Align > 0)
+    Count += Align - (Count % Align);
+
+  // We now know the final size of the stack region in #predicate elements
+  this->setRegionSize(Count);
+
+  // Return new offset in right scale (for SVE, this is #predicate elements)
+  return StartOffset + this->getRegionSize();
+}
+
+int SVEVecStackRegion::resolveFrameIndexReference(const MachineFunction &MF,
+                                                    int Idx,
+                                                    unsigned &FrameReg) const {
+  const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
+  const MachineFrameInfo *MFI = MF.getFrameInfo();
+
+  //  +-----------+
+  //  | obj @idx1 |
+  //  +-----------+
+  //  | obj @idx0 |
+  //  +-----------+ <- FP/SP
+  FrameReg = TFI->hasFP(MF) ? AArch64::FP : AArch64::SP;
+  return MFI->getObjectOffset(Idx);
+}
+
+/// Saves or Restores registers from a given pointer (Basereg)
+/// at offset Offset.
+void SVEVecStackRegion::SaveRestoreSVEFromPointer(
+    MachineFunction &MF, MachineBasicBlock &MBB,
+    MachineBasicBlock::iterator MBBI, DebugLoc DL, uint64_t Offset,
+    unsigned Basereg, bool IsSave) const {
+  const MCInstrDesc *Insn;
+  const AArch64InstrInfo *TII;
+  const AArch64RegisterInfo *TRI;
+
+  TII = static_cast<const AArch64InstrInfo *>(MF.getSubtarget().getInstrInfo());
+  TRI = static_cast<const AArch64RegisterInfo *>(
+      MF.getSubtarget().getRegisterInfo());
+
+  // Find the right instruction for the job
+  if (IsSave) {
+    if (this->IsPredicateRegion)
+      Insn = &TII->get(AArch64::STR_PXI);
+    else
+      Insn = &TII->get(AArch64::STR_ZXI);
+  } else {
+    if (this->IsPredicateRegion)
+      Insn = &TII->get(AArch64::LDR_PXI);
+    else
+      Insn = &TII->get(AArch64::LDR_ZXI);
+  }
+
+  // Store the saves at Offset+Idx from Basepointer.
+  // We first scale the Offset, because Offset is in #predicates.
+  // (LDR|STR)_V is in SVE Vector elements (i.e. scaled by 8)
+  int Idx = 0;
+  int64_t Adjust = (Offset / this->Scale) - 1;
+  for (unsigned I : CSRs) {
+    BuildMI(MBB, MBBI, DL, *Insn)
+        .addReg(I, IsSave ? RegState::Undef : RegState::Define)
+        .addReg(Basereg)
+        .addImm(Adjust + Idx);
+
+    DEBUG(dbgs() << "CSR " << (IsSave ? "spill: " : "restore: ")
+                 << TRI->getName(I) << (IsSave ? " -> " : " <- ")
+                 << (TRI->isVirtualRegister(Basereg) ? "(BP'|SP')"
+                                                     : TRI->getName(Basereg))
+                 << "[" << (Adjust + Idx) << "]\n");
+
+    --Idx;
+  }
+}
+
+void SVEVecStackRegion::emitPrologue(MachineFunction &MF,
+                                       MachineBasicBlock &MBB,
+                                       MachineBasicBlock::iterator MBBI,
+                                       DebugLoc DL,
+                                       uint64_t &AddedSize, unsigned Basereg,
+                                       uint64_t Offset) const {
+  // If Region is empty, no CSRs need saving.
+  if (RegionSize == 0)
+    return;
+
+  // If we have no CSRs to save, leave allocation for calling
+  // function or for the next invocation of emitPrologue.
+  if (CSRs.size() == 0) {
+    AddedSize += this->getRegionSize();
+    return;
+  }
+
+  // If the offset becomes too large for the immediate field to handle
+  // after updating Basereg, we create a temporary copy and save from there.
+  unsigned TmpBasereg = Basereg;
+  if (CSRs.size() > 0 &&
+      (((AddedSize + Offset) - Scale) > (uint64_t)Scale * 255)) {
+    TmpBasereg = adjustRegBySVE(MF, MBB, MBBI, DL, Basereg, /*Offset=*/0,
+                                  /*IsPositiveOffset=*/false);
+    Offset = 0;
+  }
+
+  // Adjust the Stack Pointer to allocate the space
+  adjustRegBySVE(MF, MBB, MBBI, DL, Basereg, this->getRegionSize() + AddedSize,
+                   /*IsPositiveOffset=*/false, /*Dst=*/AArch64::SP);
+
+  // Reset AddedSize, because Basereg is now updated
+  AddedSize = 0;
+
+  // Restore the SVE registers
+  SaveRestoreSVEFromPointer(MF, MBB, MBBI, DL, Offset, TmpBasereg, true);
+}
+
+void SVEVecStackRegion::emitEpilogue(MachineFunction &MF,
+                                       MachineBasicBlock &MBB,
+                                       MachineBasicBlock::iterator MBBI,
+                                       DebugLoc DL,
+                                       uint64_t &AddedSize, unsigned &Basereg,
+                                       uint64_t Offset) const {
+  // If Region is empty, no CSRs need restoring.
+  if (RegionSize == 0)
+    return;
+
+  // If we have no CSRs to restore, leave deallocation for calling function.
+  if (CSRs.size() == 0) {
+    AddedSize += this->getRegionSize();
+    return;
+  }
+
+  // If we cannot reach the last save with an immediate from the
+  // Basepointer, create a temporary SP' from which we restore
+  // (at Offset 0).
+  bool BPChanged = false;
+  if (CSRs.size() > 0 &&
+      ((AddedSize + Offset) - Scale) > (uint64_t)Scale * 255) {
+    Basereg = adjustRegBySVE(MF, MBB, MBBI, DL, Basereg, AddedSize + Offset,
+                               /*IsPositiveOffset=*/true);
+
+    // The change to Basereg also resets the cumulative AddedSize relative to
+    // Basereg.
+    AddedSize = 0;
+    Offset = 0;
+    BPChanged = true;
+  }
+
+  // Restore the SVE registers.
+  SaveRestoreSVEFromPointer(MF, MBB, MBBI, DL, AddedSize + Offset, Basereg, false);
+
+  // Update cumulative offset to Basereg.
+  if (!BPChanged)
+    AddedSize += this->getRegionSize();
 }

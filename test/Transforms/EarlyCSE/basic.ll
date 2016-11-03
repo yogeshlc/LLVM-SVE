@@ -276,3 +276,13 @@ define void @dse_neg2(i32 *%P) {
   ret void
 }
 
+; Ensure that only one seriesvector is created
+define <n x 2 x i64> @seriesvector(i64 %init) {
+; CHECK-LABEL: @seriesvector
+; CHECK-NEXT: seriesvector
+; CHECK-NEXT: add
+  %v1 = seriesvector i64 %init, 2 as <n x 2 x i64>
+  %v2 = seriesvector i64 %init, 2 as <n x 2 x i64>
+  %res = add <n x 2 x i64> %v1, %v2
+  ret <n x 2 x i64> %res
+}

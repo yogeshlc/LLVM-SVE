@@ -212,6 +212,9 @@ int RAFast::getStackSpaceFor(unsigned VirtReg, const TargetRegisterClass *RC) {
   int FrameIdx = MF->getFrameInfo()->CreateSpillStackObject(RC->getSize(),
                                                             RC->getAlignment());
 
+  if (StackRegion *SR = MF->getFrameInfo()->getStackRegionToHandleRegClass(RC))
+    SR->addObject(*(MF->getFrameInfo()), FrameIdx);
+
   // Assign the slot.
   StackSlotForVirtReg[VirtReg] = FrameIdx;
   return FrameIdx;

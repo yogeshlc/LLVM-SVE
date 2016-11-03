@@ -280,3 +280,8 @@ Pass *RegionPass::createPrinterPass(raw_ostream &O,
                                   const std::string &Banner) const {
   return new PrintRegionPass(Banner, O);
 }
+
+Pass *RegionPass::createBlamePass(const std::string &PassName) const {
+  assert(0);
+  return nullptr;
+}

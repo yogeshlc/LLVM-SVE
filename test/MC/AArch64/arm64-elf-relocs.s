@@ -1,5 +1,7 @@
 // RUN: llvm-mc -triple=arm64-linux-gnu -o - < %s | FileCheck %s
 // RUN: llvm-mc -triple=arm64-linux-gnu -filetype=obj < %s | llvm-objdump -triple=arm64-linux-gnu - -r | FileCheck %s --check-prefix=CHECK-OBJ
+// RUN: llvm-mc -triple=arm64-linux-gnu -mattr=+sve -o - < %s | FileCheck %s
+// RUN: llvm-mc -triple=arm64-linux-gnu -mattr=+sve -filetype=obj < %s | llvm-objdump -triple=arm64-linux-gnu - -r | FileCheck %s --check-prefix=CHECK-OBJ
 
    add x0, x2, #:lo12:sym
 // CHECK: add x0, x2, :lo12:sym

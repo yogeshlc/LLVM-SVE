@@ -394,7 +394,9 @@ private:
   bool WillNotOverflowSignedMul(Value *LHS, Value *RHS, Instruction &CxtI);
   Value *EmitGEPOffset(User *GEP);
   Instruction *scalarizePHI(ExtractElementInst &EI, PHINode *PN);
+  Instruction *scalarizeGEP(GetElementPtrInst *GEP, unsigned Index);
   Value *EvaluateInDifferentElementOrder(Value *V, ArrayRef<int> Mask);
+  Value *FindScalarElement(Value *V, unsigned EltNo);
   Instruction *foldCastedBitwiseLogic(BinaryOperator &I);
   Instruction *optimizeBitCastFromPhi(CastInst &CI, PHINode *PN);
 

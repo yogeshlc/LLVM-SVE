@@ -450,6 +450,10 @@ public:
   CallInst *CreateMaskedLoad(Value *Ptr, unsigned Align, Value *Mask,
                              Value *PassThru = nullptr, const Twine &Name = "");
 
+  /// \brief Create a call to Masked Speculative Load intrinsic
+  CallInst *CreateMaskedSpecLoad(Value *Ptr, unsigned Align, Value *Mask,
+                                 Value *PassThru = 0, const Twine &Name = "");
+
   /// \brief Create a call to Masked Store intrinsic
   CallInst *CreateMaskedStore(Value *Val, Value *Ptr, unsigned Align,
                               Value *Mask);
@@ -537,6 +541,8 @@ public:
                              int DerivedOffset,
                              Type *ResultType,
                              const Twine &Name = "");
+
+  CallInst *CreateCntVPop(Value *PredVec, const Twine &Name);
 
 private:
   /// \brief Create a call to a masked intrinsic with given Id.
@@ -1551,6 +1557,18 @@ public:
                                       FPMathTag, FMF), Name);
   }
 
+  Value *CreateTest(TestInst::Predicate P, Value *V, const Twine &Name = "") {
+    return Insert(new TestInst(P, V), Name);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Instruction creation methods: Predicate Instructions
+  //===--------------------------------------------------------------------===//
+
+  Value *CreatePropFF(Value* P1, Value *P2, const Twine &Name = "") {
+    return Insert(new PropFFInst(P1, P2), Name);
+  }
+
   //===--------------------------------------------------------------------===//
   // Instruction creation methods: Other Instructions
   //===--------------------------------------------------------------------===//
@@ -1652,6 +1670,28 @@ public:
     return CreateShuffleVector(V1, V2, Mask, Name);
   }
 
+  Value *CreateElementCount(Type *Ty, Value *V, const Twine &Name = "") {
+    if (Constant *C = dyn_cast<Constant>(V))
+      return Insert(Folder.CreateElementCount(Ty, C), Name);
+
+    return Insert(new ElementCountInst(Ty, V), Name);
+  }
+
+  Value *CreateSeriesVector(VectorType::ElementCount EC, Value *Start,
+                            Value* Step, const Twine &Name = "",
+                            bool HasNUW = false, bool HasNSW = false) {
+    if (Constant *StartC = dyn_cast<Constant>(Start))
+      if (Constant *StepC = dyn_cast<Constant>(Step))
+        return Insert(Folder.CreateSeriesVector(EC, StartC, StepC, HasNUW,
+                                                HasNSW), Name);
+
+    SeriesVectorInst *SV = Insert(new SeriesVectorInst(Start, Step, EC), Name);
+    SV->setHasNoUnsignedWrap(HasNUW);
+    SV->setHasNoSignedWrap(HasNSW);
+
+    return SV;
+  }
+
   Value *CreateExtractValue(Value *Agg,
                             ArrayRef<unsigned> Idxs,
                             const Twine &Name = "") {
@@ -1734,20 +1774,20 @@ public:
     return Fn;
   }
 
-  /// \brief Return a vector value that contains \arg V broadcasted to \p
-  /// NumElts elements.
-  Value *CreateVectorSplat(unsigned NumElts, Value *V, const Twine &Name = "") {
-    assert(NumElts > 0 && "Cannot splat to an empty vector!");
+  /// \brief Return a vector value that contains \arg V broadcasted onto \p
+  /// a vector of the same size as \arg VT
+  Value *CreateVectorSplat(VectorType::ElementCount EC, Value *V,
+                           const Twine &Name = "") {
+    assert(EC.Min > 0 && "Cannot splat to an empty vector!");
 
-    // First insert it into an undef vector so we can shuffle it.
     Type *I32Ty = getInt32Ty();
-    Value *Undef = UndefValue::get(VectorType::get(V->getType(), NumElts));
-    V = CreateInsertElement(Undef, V, ConstantInt::get(I32Ty, 0),
+    Value *UndefV = UndefValue::get(VectorType::get(V->getType(), EC));
+    V = CreateInsertElement(UndefV, V, ConstantInt::get(I32Ty, 0),
                             Name + ".splatinsert");
 
     // Shuffle the value across the desired number of elements.
-    Value *Zeros = ConstantAggregateZero::get(VectorType::get(I32Ty, NumElts));
-    return CreateShuffleVector(V, Undef, Zeros, Name + ".splat");
+    Value *Zeros = ConstantAggregateZero::get(VectorType::get(I32Ty, EC));
+    return CreateShuffleVector(V, UndefV, Zeros, Name + ".splat");
   }
 
   /// \brief Return a value that has been extracted from a larger integer type.

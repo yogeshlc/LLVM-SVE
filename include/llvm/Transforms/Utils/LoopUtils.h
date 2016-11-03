@@ -64,15 +64,15 @@ class RecurrenceDescriptor {
 public:
   /// This enum represents the kinds of recurrences that we support.
   enum RecurrenceKind {
-    RK_NoRecurrence,  ///< Not a recurrence.
-    RK_IntegerAdd,    ///< Sum of integers.
-    RK_IntegerMult,   ///< Product of integers.
-    RK_IntegerOr,     ///< Bitwise or logical OR of numbers.
-    RK_IntegerAnd,    ///< Bitwise or logical AND of numbers.
-    RK_IntegerXor,    ///< Bitwise or logical XOR of numbers.
-    RK_IntegerMinMax, ///< Min/max implemented in terms of select(cmp()).
-    RK_FloatAdd,      ///< Sum of floats.
-    RK_FloatMult,     ///< Product of floats.
+    RK_NoRecurrence,   ///< Not a recurrence.
+    RK_IntegerAdd,     ///< Sum of integers.
+    RK_IntegerMult,    ///< Product of integers.
+    RK_IntegerOr,      ///< Bitwise or logical OR of numbers.
+    RK_IntegerAnd,     ///< Bitwise or logical AND of numbers.
+    RK_IntegerXor,     ///< Bitwise or logical XOR of numbers.
+    RK_IntegerMinMax,  ///< Min/max implemented in terms of select(cmp()).
+    RK_FloatAdd,       ///< Sum of floats.
+    RK_FloatMult,      ///< Product of floats.
     RK_FloatMinMax    ///< Min/max implemented in terms of select(cmp()).
   };
 
@@ -87,17 +87,27 @@ public:
     MRK_FloatMax
   };
 
-  RecurrenceDescriptor()
-      : StartValue(nullptr), LoopExitInstr(nullptr), Kind(RK_NoRecurrence),
-        MinMaxKind(MRK_Invalid), UnsafeAlgebraInst(nullptr),
-        RecurrenceType(nullptr), IsSigned(false) {}
+  typedef SmallVector<Instruction*, 4> ExitInstrList;
 
-  RecurrenceDescriptor(Value *Start, Instruction *Exit, RecurrenceKind K,
+  RecurrenceDescriptor()
+      : IntermediateStore(nullptr), StartValue(nullptr), Kind(RK_NoRecurrence),
+        MinMaxKind(MRK_Invalid), UnsafeAlgebraInst(nullptr),
+        RecurrenceType(nullptr), IsSigned(false), IsOrdered(false) {}
+
+  // TODO: Is there a nice way to initialize this without the manual loop?
+  // Maybe, does the insert thing work with SmallVectorImpl? (CastInsts
+  // was added with the recent merge)
+  RecurrenceDescriptor(Value *Start, SmallVectorImpl<Instruction*> &Exits,
+                       StoreInst* Store, RecurrenceKind K,
                        MinMaxRecurrenceKind MK, Instruction *UAI, Type *RT,
-                       bool Signed, SmallPtrSetImpl<Instruction *> &CI)
-      : StartValue(Start), LoopExitInstr(Exit), Kind(K), MinMaxKind(MK),
-        UnsafeAlgebraInst(UAI), RecurrenceType(RT), IsSigned(Signed) {
+                       bool Signed, SmallPtrSetImpl<Instruction *> &CI,
+                       bool IsOrdered)
+    : IntermediateStore(Store), StartValue(Start), Kind(K), MinMaxKind(MK),
+      UnsafeAlgebraInst(UAI), RecurrenceType(RT), IsSigned(Signed),
+      IsOrdered(IsOrdered) {
     CastInsts.insert(CI.begin(), CI.end());
+    for (Instruction *Exit : Exits)
+      LoopExitInstrs.push_back(Exit);
   }
 
   /// This POD struct holds information about a potential recurrence operation.
@@ -169,12 +179,20 @@ public:
   /// RecurrenceDescriptor.
   static bool AddReductionVar(PHINode *Phi, RecurrenceKind Kind, Loop *TheLoop,
                               bool HasFunNoNaNAttr,
-                              RecurrenceDescriptor &RedDes);
+                              ScalarEvolution *SE,
+                              RecurrenceDescriptor &RedDes,
+                              bool AllowMultipleExits);
 
   /// Returns true if Phi is a reduction in TheLoop. The RecurrenceDescriptor is
   /// returned in RedDes.
   static bool isReductionPHI(PHINode *Phi, Loop *TheLoop,
-                             RecurrenceDescriptor &RedDes);
+                             ScalarEvolution *SE,
+                             RecurrenceDescriptor &RedDes,
+                             bool AllowMultipleExits = false);
+
+  RecurrenceKind getRecurrenceKind() const { return Kind; }
+
+  MinMaxRecurrenceKind getMinMaxRecurrenceKind() const { return MinMaxKind; }
 
   /// Returns true if Phi is a first-order recurrence. A first-order recurrence
   /// is a non-reduction recurrence relation in which the value of the
@@ -183,13 +201,34 @@ public:
   static bool isFirstOrderRecurrence(PHINode *Phi, Loop *TheLoop,
                                      DominatorTree *DT);
 
-  RecurrenceKind getRecurrenceKind() { return Kind; }
+  TrackingVH<Value> getRecurrenceStartValue() const { return StartValue; }
 
-  MinMaxRecurrenceKind getMinMaxRecurrenceKind() { return MinMaxKind; }
+  // For the 'normal' loop vectorizer
+  Instruction *getLoopExitInstr()  const {
+    if (LoopExitInstrs.size() != 1) {
+      auto NumExits = LoopExitInstrs.size();
+      errs() << "getLoopExitInstr: NumExits: " << NumExits << "\n";
+      for (auto *E : LoopExitInstrs)
+        E->dump();
+      // Previously asserted here; keeping the print above but allowing
+      // for progression.
+      //
+      // When using debug to examine all problems with loops from
+      // the vectorizer, we just return a null here to indicate that
+      // there isn't a *single* instruction here, in much the same
+      // way the LoopInfo functions to get exiting/exit blocks work.
+      return nullptr;
+    }
+    return LoopExitInstrs.back();
+  }
 
-  TrackingVH<Value> getRecurrenceStartValue() { return StartValue; }
+  ExitInstrList *getLoopExitInstrs() { return &LoopExitInstrs; }
 
-  Instruction *getLoopExitInstr() { return LoopExitInstr; }
+  // TODO: Something more than Instruction ptrs ?
+  // Would make for a nicer iterator than Inst**
+  iterator_range<Instruction**> exitInstrs() {
+    return make_range(LoopExitInstrs.begin(), LoopExitInstrs.end());
+  }
 
   /// Returns true if the recurrence has unsafe algebra which requires a relaxed
   /// floating-point model.
@@ -227,7 +266,7 @@ public:
 
   /// Returns the type of the recurrence. This type can be narrower than the
   /// actual type of the Phi if the recurrence has been type-promoted.
-  Type *getRecurrenceType() { return RecurrenceType; }
+  Type *getRecurrenceType() const { return RecurrenceType; }
 
   /// Returns a reference to the instructions used for type-promoting the
   /// recurrence.
@@ -236,12 +275,20 @@ public:
   /// Returns true if all source operands of the recurrence are SExtInsts.
   bool isSigned() { return IsSigned; }
 
+  /// The list of intermediate stores of reductions
+  StoreInst * IntermediateStore;
+
+  /// Expose an ordered FP reduction to the instance users.
+  bool isOrdered() const { return IsOrdered; }
+
 private:
   // The starting value of the recurrence.
   // It does not have to be zero!
   TrackingVH<Value> StartValue;
   // The instruction who's value is used outside the loop.
-  Instruction *LoopExitInstr;
+  //  Instruction *LoopExitInstr;
+  // TODO: Do we need to match the exit block to the instruction?
+  ExitInstrList LoopExitInstrs;
   // The kind of the recurrence.
   RecurrenceKind Kind;
   // If this a min/max recurrence the kind of recurrence.
@@ -254,6 +301,8 @@ private:
   bool IsSigned;
   // Instructions used for type-promoting the recurrence.
   SmallPtrSet<Instruction *, 8> CastInsts;
+  // If this is an ordered reduction
+  bool IsOrdered;
 };
 
 /// A struct for saving information about induction variables.
@@ -263,13 +312,15 @@ public:
   enum InductionKind {
     IK_NoInduction,  ///< Not an induction variable.
     IK_IntInduction, ///< Integer induction variable. Step = C.
-    IK_PtrInduction  ///< Pointer induction var. Step = C / sizeof(elem).
+    IK_PtrInduction,  ///< Pointer induction var. Step = C / sizeof(elem).
+    IK_FPInduction   ///< Faux floating point induction variable. Step = C.
   };
 
 public:
   /// Default constructor - creates an invalid induction.
   InductionDescriptor()
-      : StartValue(nullptr), IK(IK_NoInduction), Step(nullptr) {}
+      : StartValue(nullptr), IK(IK_NoInduction), Step(nullptr),
+        StepValue(nullptr) {}
 
   /// Get the consecutive direction. Returns:
   ///   0 - unknown or non-consecutive.
@@ -289,6 +340,7 @@ public:
   Value *getStartValue() const { return StartValue; }
   InductionKind getKind() const { return IK; }
   const SCEV *getStep() const { return Step; }
+  Value *getStepValue() const { return StepValue; }
   ConstantInt *getConstIntStepValue() const;
 
   /// Returns true if \p Phi is an induction. If \p Phi is an induction,
@@ -306,18 +358,23 @@ public:
   /// If \p Phi is an induction, \p D will contain the data describing this
   /// induction.
   static bool isInductionPHI(PHINode *Phi, PredicatedScalarEvolution &PSE,
-                             InductionDescriptor &D, bool Assume = false);
+                             InductionDescriptor &D, bool Assume = false,
+                             Loop *L = nullptr);
 
 private:
   /// Private constructor - used by \c isInductionPHI.
   InductionDescriptor(Value *Start, InductionKind K, const SCEV *Step);
+  /// Private constructor - used by \c isInductionPHI for FP inductions.
+  InductionDescriptor(Value *Start, InductionKind K, Value *Step);
 
   /// Start value.
   TrackingVH<Value> StartValue;
   /// Induction kind.
   InductionKind IK;
-  /// Step value.
+  /// Step SCEV.
   const SCEV *Step;
+  /// Step Value for fp inductions.
+  Value *StepValue;
 };
 
 BasicBlock *InsertPreheaderForLoop(Loop *L, DominatorTree *DT, LoopInfo *LI,

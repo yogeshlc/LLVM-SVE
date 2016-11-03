@@ -1739,7 +1739,12 @@ static void patchReplacementInstruction(Instruction *I, Value *Repl) {
 
   // Patch the replacement so that it is not more restrictive than the value
   // being replaced.
-  ReplInst->andIRFlags(I);
+  //
+  // Avoiding copying flags from loads, since they won't have them, which
+  // can cause fastmath flags to be dropped. Need to revisit in future to see
+  // if others should also be skipped.
+  if (!isa<LoadInst>(I))
+    ReplInst->andIRFlags(I);
 
   // FIXME: If both the original and replacement value are part of the
   // same control-flow region (meaning that the execution of one

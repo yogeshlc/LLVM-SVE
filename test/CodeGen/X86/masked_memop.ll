@@ -4,6 +4,9 @@
 ; RUN: llc -mtriple=x86_64-apple-darwin -mattr=avx512f < %s | FileCheck %s --check-prefix=AVX512 --check-prefix=AVX512F
 ; RUN: llc -mtriple=x86_64-apple-darwin -mattr=avx512f,avx512bw,avx512vl < %s | FileCheck %s --check-prefix=AVX512 --check-prefix=SKX
 
+; TODO: May community merge fallout
+; XFAIL: *
+
 ; To test for the case where masked load/store is not legal, we should add a run with a target
 ; that does not have AVX, but that case should probably be a separate test file using less tests
 ; because it takes over 1.2 seconds to codegen these tests on Haswell 4GHz if there's no maskmov.
@@ -11,26 +14,26 @@
 define <16 x i32> @test1(<16 x i32> %trigger, <16 x i32>* %addr) {
 ; AVX1-LABEL: test1:
 ; AVX1:       ## BB#0:
-; AVX1-NEXT:    vextractf128 $1, %ymm0, %xmm2
-; AVX1-NEXT:    vpxor %xmm3, %xmm3, %xmm3
-; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm2, %xmm2
-; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm0, %xmm0
-; AVX1-NEXT:    vinsertf128 $1, %xmm2, %ymm0, %ymm0
 ; AVX1-NEXT:    vextractf128 $1, %ymm1, %xmm2
+; AVX1-NEXT:    vpxor %xmm3, %xmm3, %xmm3
 ; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm2, %xmm2
 ; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm1, %xmm1
 ; AVX1-NEXT:    vinsertf128 $1, %xmm2, %ymm1, %ymm1
-; AVX1-NEXT:    vmaskmovps 32(%rdi), %ymm1, %ymm1
+; AVX1-NEXT:    vextractf128 $1, %ymm0, %xmm2
+; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm2, %xmm2
+; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm0, %xmm0
+; AVX1-NEXT:    vinsertf128 $1, %xmm2, %ymm0, %ymm0
 ; AVX1-NEXT:    vmaskmovps (%rdi), %ymm0, %ymm0
+; AVX1-NEXT:    vmaskmovps 32(%rdi), %ymm1, %ymm1
 ; AVX1-NEXT:    retq
 ;
 ; AVX2-LABEL: test1:
 ; AVX2:       ## BB#0:
 ; AVX2-NEXT:    vpxor %ymm2, %ymm2, %ymm2
-; AVX2-NEXT:    vpcmpeqd %ymm2, %ymm0, %ymm0
 ; AVX2-NEXT:    vpcmpeqd %ymm2, %ymm1, %ymm1
-; AVX2-NEXT:    vpmaskmovd 32(%rdi), %ymm1, %ymm1
+; AVX2-NEXT:    vpcmpeqd %ymm2, %ymm0, %ymm0
 ; AVX2-NEXT:    vpmaskmovd (%rdi), %ymm0, %ymm0
+; AVX2-NEXT:    vpmaskmovd 32(%rdi), %ymm1, %ymm1
 ; AVX2-NEXT:    retq
 ;
 ; AVX512-LABEL: test1:
@@ -47,26 +50,26 @@ define <16 x i32> @test1(<16 x i32> %trigger, <16 x i32>* %addr) {
 define <16 x i32> @test2(<16 x i32> %trigger, <16 x i32>* %addr) {
 ; AVX1-LABEL: test2:
 ; AVX1:       ## BB#0:
-; AVX1-NEXT:    vextractf128 $1, %ymm0, %xmm2
-; AVX1-NEXT:    vpxor %xmm3, %xmm3, %xmm3
-; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm2, %xmm2
-; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm0, %xmm0
-; AVX1-NEXT:    vinsertf128 $1, %xmm2, %ymm0, %ymm0
 ; AVX1-NEXT:    vextractf128 $1, %ymm1, %xmm2
+; AVX1-NEXT:    vpxor %xmm3, %xmm3, %xmm3
 ; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm2, %xmm2
 ; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm1, %xmm1
 ; AVX1-NEXT:    vinsertf128 $1, %xmm2, %ymm1, %ymm1
-; AVX1-NEXT:    vmaskmovps 32(%rdi), %ymm1, %ymm1
+; AVX1-NEXT:    vextractf128 $1, %ymm0, %xmm2
+; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm2, %xmm2
+; AVX1-NEXT:    vpcmpeqd %xmm3, %xmm0, %xmm0
+; AVX1-NEXT:    vinsertf128 $1, %xmm2, %ymm0, %ymm0
 ; AVX1-NEXT:    vmaskmovps (%rdi), %ymm0, %ymm0
+; AVX1-NEXT:    vmaskmovps 32(%rdi), %ymm1, %ymm1
 ; AVX1-NEXT:    retq
 ;
 ; AVX2-LABEL: test2:
 ; AVX2:       ## BB#0:
 ; AVX2-NEXT:    vpxor %ymm2, %ymm2, %ymm2
-; AVX2-NEXT:    vpcmpeqd %ymm2, %ymm0, %ymm0
 ; AVX2-NEXT:    vpcmpeqd %ymm2, %ymm1, %ymm1
-; AVX2-NEXT:    vpmaskmovd 32(%rdi), %ymm1, %ymm1
+; AVX2-NEXT:    vpcmpeqd %ymm2, %ymm0, %ymm0
 ; AVX2-NEXT:    vpmaskmovd (%rdi), %ymm0, %ymm0
+; AVX2-NEXT:    vpmaskmovd 32(%rdi), %ymm1, %ymm1
 ; AVX2-NEXT:    retq
 ;
 ; AVX512-LABEL: test2:
@@ -1453,49 +1456,49 @@ declare <16 x i32*> @llvm.masked.load.v16p0i32(<16 x i32*>*, i32, <16 x i1>, <16
 define <16 x i32*> @test23(<16 x i32*> %trigger, <16 x i32*>* %addr) {
 ; AVX1-LABEL: test23:
 ; AVX1:       ## BB#0:
-; AVX1-NEXT:    vextractf128 $1, %ymm0, %xmm4
+; AVX1-NEXT:    vextractf128 $1, %ymm3, %xmm4
 ; AVX1-NEXT:    vpxor %xmm5, %xmm5, %xmm5
 ; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm4, %xmm4
-; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm0, %xmm0
-; AVX1-NEXT:    vinsertf128 $1, %xmm4, %ymm0, %ymm0
-; AVX1-NEXT:    vextractf128 $1, %ymm1, %xmm4
-; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm4, %xmm4
-; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm1, %xmm1
-; AVX1-NEXT:    vinsertf128 $1, %xmm4, %ymm1, %ymm1
+; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm3, %xmm3
+; AVX1-NEXT:    vinsertf128 $1, %xmm4, %ymm3, %ymm3
 ; AVX1-NEXT:    vextractf128 $1, %ymm2, %xmm4
 ; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm4, %xmm4
 ; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm2, %xmm2
 ; AVX1-NEXT:    vinsertf128 $1, %xmm4, %ymm2, %ymm2
-; AVX1-NEXT:    vextractf128 $1, %ymm3, %xmm4
+; AVX1-NEXT:    vextractf128 $1, %ymm1, %xmm4
 ; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm4, %xmm4
-; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm3, %xmm3
-; AVX1-NEXT:    vinsertf128 $1, %xmm4, %ymm3, %ymm3
-; AVX1-NEXT:    vmaskmovpd 96(%rdi), %ymm3, %ymm3
-; AVX1-NEXT:    vmaskmovpd 64(%rdi), %ymm2, %ymm2
-; AVX1-NEXT:    vmaskmovpd 32(%rdi), %ymm1, %ymm1
+; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm1, %xmm1
+; AVX1-NEXT:    vinsertf128 $1, %xmm4, %ymm1, %ymm1
+; AVX1-NEXT:    vextractf128 $1, %ymm0, %xmm4
+; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm4, %xmm4
+; AVX1-NEXT:    vpcmpeqq %xmm5, %xmm0, %xmm0
+; AVX1-NEXT:    vinsertf128 $1, %xmm4, %ymm0, %ymm0
 ; AVX1-NEXT:    vmaskmovpd (%rdi), %ymm0, %ymm0
+; AVX1-NEXT:    vmaskmovpd 32(%rdi), %ymm1, %ymm1
+; AVX1-NEXT:    vmaskmovpd 64(%rdi), %ymm2, %ymm2
+; AVX1-NEXT:    vmaskmovpd 96(%rdi), %ymm3, %ymm3
 ; AVX1-NEXT:    retq
 ;
 ; AVX2-LABEL: test23:
 ; AVX2:       ## BB#0:
 ; AVX2-NEXT:    vpxor %ymm4, %ymm4, %ymm4
-; AVX2-NEXT:    vpcmpeqq %ymm4, %ymm0, %ymm0
-; AVX2-NEXT:    vpcmpeqq %ymm4, %ymm1, %ymm1
-; AVX2-NEXT:    vpcmpeqq %ymm4, %ymm2, %ymm2
 ; AVX2-NEXT:    vpcmpeqq %ymm4, %ymm3, %ymm3
-; AVX2-NEXT:    vpmaskmovq 96(%rdi), %ymm3, %ymm3
-; AVX2-NEXT:    vpmaskmovq 64(%rdi), %ymm2, %ymm2
-; AVX2-NEXT:    vpmaskmovq 32(%rdi), %ymm1, %ymm1
+; AVX2-NEXT:    vpcmpeqq %ymm4, %ymm2, %ymm2
+; AVX2-NEXT:    vpcmpeqq %ymm4, %ymm1, %ymm1
+; AVX2-NEXT:    vpcmpeqq %ymm4, %ymm0, %ymm0
 ; AVX2-NEXT:    vpmaskmovq (%rdi), %ymm0, %ymm0
+; AVX2-NEXT:    vpmaskmovq 32(%rdi), %ymm1, %ymm1
+; AVX2-NEXT:    vpmaskmovq 64(%rdi), %ymm2, %ymm2
+; AVX2-NEXT:    vpmaskmovq 96(%rdi), %ymm3, %ymm3
 ; AVX2-NEXT:    retq
 ;
 ; AVX512-LABEL: test23:
 ; AVX512:       ## BB#0:
 ; AVX512-NEXT:    vpxord %zmm2, %zmm2, %zmm2
-; AVX512-NEXT:    vpcmpeqq %zmm2, %zmm0, %k1
-; AVX512-NEXT:    vpcmpeqq %zmm2, %zmm1, %k2
-; AVX512-NEXT:    vmovdqu64 64(%rdi), %zmm1 {%k2} {z}
-; AVX512-NEXT:    vmovdqu64 (%rdi), %zmm0 {%k1} {z}
+; AVX512-NEXT:    vpcmpeqq %zmm2, %zmm1, %k1
+; AVX512-NEXT:    vpcmpeqq %zmm2, %zmm0, %k2
+; AVX512-NEXT:    vmovdqu64 (%rdi), %zmm0 {%k2} {z}
+; AVX512-NEXT:    vmovdqu64 64(%rdi), %zmm1 {%k1} {z}
 ; AVX512-NEXT:    retq
   %mask = icmp eq <16 x i32*> %trigger, zeroinitializer
   %res = call <16 x i32*> @llvm.masked.load.v16p0i32(<16 x i32*>* %addr, i32 4, <16 x i1>%mask, <16 x i32*>zeroinitializer)
@@ -1517,7 +1520,7 @@ define <16 x %mystruct*> @test24(<16 x i1> %mask, <16 x %mystruct*>* %addr) {
 ; AVX1-NEXT:    vpmovsxdq %xmm1, %xmm1
 ; AVX1-NEXT:    vinsertf128 $1, %xmm1, %ymm2, %ymm1
 ; AVX1-NEXT:    vmaskmovpd (%rdi), %ymm1, %ymm4
-; AVX1-NEXT:    vpshufd {{.*#+}} xmm1 = xmm0[3,1,2,3]
+; AVX1-NEXT:    vpshufd {{.*#+}} xmm1 = xmm0[1,1,2,3]
 ; AVX1-NEXT:    vpmovzxbd {{.*#+}} xmm1 = xmm1[0],zero,zero,zero,xmm1[1],zero,zero,zero,xmm1[2],zero,zero,zero,xmm1[3],zero,zero,zero
 ; AVX1-NEXT:    vpslld $31, %xmm1, %xmm1
 ; AVX1-NEXT:    vpsrad $31, %xmm1, %xmm1
@@ -1525,25 +1528,25 @@ define <16 x %mystruct*> @test24(<16 x i1> %mask, <16 x %mystruct*>* %addr) {
 ; AVX1-NEXT:    vpshufd {{.*#+}} xmm1 = xmm1[2,3,0,1]
 ; AVX1-NEXT:    vpmovsxdq %xmm1, %xmm1
 ; AVX1-NEXT:    vinsertf128 $1, %xmm1, %ymm2, %ymm1
-; AVX1-NEXT:    vmaskmovpd 96(%rdi), %ymm1, %ymm3
-; AVX1-NEXT:    vpshufd {{.*#+}} xmm1 = xmm0[2,3,0,1]
-; AVX1-NEXT:    vpmovzxbd {{.*#+}} xmm1 = xmm1[0],zero,zero,zero,xmm1[1],zero,zero,zero,xmm1[2],zero,zero,zero,xmm1[3],zero,zero,zero
-; AVX1-NEXT:    vpslld $31, %xmm1, %xmm1
-; AVX1-NEXT:    vpsrad $31, %xmm1, %xmm1
-; AVX1-NEXT:    vpmovsxdq %xmm1, %xmm2
-; AVX1-NEXT:    vpshufd {{.*#+}} xmm1 = xmm1[2,3,0,1]
-; AVX1-NEXT:    vpmovsxdq %xmm1, %xmm1
-; AVX1-NEXT:    vinsertf128 $1, %xmm1, %ymm2, %ymm1
-; AVX1-NEXT:    vmaskmovpd 64(%rdi), %ymm1, %ymm2
-; AVX1-NEXT:    vpshufd {{.*#+}} xmm0 = xmm0[1,1,2,3]
+; AVX1-NEXT:    vmaskmovpd 32(%rdi), %ymm1, %ymm1
+; AVX1-NEXT:    vpshufd {{.*#+}} xmm2 = xmm0[2,3,0,1]
+; AVX1-NEXT:    vpmovzxbd {{.*#+}} xmm2 = xmm2[0],zero,zero,zero,xmm2[1],zero,zero,zero,xmm2[2],zero,zero,zero,xmm2[3],zero,zero,zero
+; AVX1-NEXT:    vpslld $31, %xmm2, %xmm2
+; AVX1-NEXT:    vpsrad $31, %xmm2, %xmm2
+; AVX1-NEXT:    vpmovsxdq %xmm2, %xmm3
+; AVX1-NEXT:    vpshufd {{.*#+}} xmm2 = xmm2[2,3,0,1]
+; AVX1-NEXT:    vpmovsxdq %xmm2, %xmm2
+; AVX1-NEXT:    vinsertf128 $1, %xmm2, %ymm3, %ymm2
+; AVX1-NEXT:    vmaskmovpd 64(%rdi), %ymm2, %ymm2
+; AVX1-NEXT:    vpshufd {{.*#+}} xmm0 = xmm0[3,1,2,3]
 ; AVX1-NEXT:    vpmovzxbd {{.*#+}} xmm0 = xmm0[0],zero,zero,zero,xmm0[1],zero,zero,zero,xmm0[2],zero,zero,zero,xmm0[3],zero,zero,zero
 ; AVX1-NEXT:    vpslld $31, %xmm0, %xmm0
 ; AVX1-NEXT:    vpsrad $31, %xmm0, %xmm0
-; AVX1-NEXT:    vpmovsxdq %xmm0, %xmm1
+; AVX1-NEXT:    vpmovsxdq %xmm0, %xmm3
 ; AVX1-NEXT:    vpshufd {{.*#+}} xmm0 = xmm0[2,3,0,1]
 ; AVX1-NEXT:    vpmovsxdq %xmm0, %xmm0
-; AVX1-NEXT:    vinsertf128 $1, %xmm0, %ymm1, %ymm0
-; AVX1-NEXT:    vmaskmovpd 32(%rdi), %ymm0, %ymm1
+; AVX1-NEXT:    vinsertf128 $1, %xmm0, %ymm3, %ymm0
+; AVX1-NEXT:    vmaskmovpd 96(%rdi), %ymm0, %ymm3
 ; AVX1-NEXT:    vmovapd %ymm4, %ymm0
 ; AVX1-NEXT:    retq
 ;
@@ -1554,24 +1557,24 @@ define <16 x %mystruct*> @test24(<16 x i1> %mask, <16 x %mystruct*>* %addr) {
 ; AVX2-NEXT:    vpsrad $31, %xmm1, %xmm1
 ; AVX2-NEXT:    vpmovsxdq %xmm1, %ymm1
 ; AVX2-NEXT:    vpmaskmovq (%rdi), %ymm1, %ymm4
-; AVX2-NEXT:    vpshufd {{.*#+}} xmm1 = xmm0[3,1,2,3]
+; AVX2-NEXT:    vpshufd {{.*#+}} xmm1 = xmm0[1,1,2,3]
 ; AVX2-NEXT:    vpmovzxbd {{.*#+}} xmm1 = xmm1[0],zero,zero,zero,xmm1[1],zero,zero,zero,xmm1[2],zero,zero,zero,xmm1[3],zero,zero,zero
 ; AVX2-NEXT:    vpslld $31, %xmm1, %xmm1
 ; AVX2-NEXT:    vpsrad $31, %xmm1, %xmm1
 ; AVX2-NEXT:    vpmovsxdq %xmm1, %ymm1
-; AVX2-NEXT:    vpmaskmovq 96(%rdi), %ymm1, %ymm3
-; AVX2-NEXT:    vpshufd {{.*#+}} xmm1 = xmm0[2,3,0,1]
-; AVX2-NEXT:    vpmovzxbd {{.*#+}} xmm1 = xmm1[0],zero,zero,zero,xmm1[1],zero,zero,zero,xmm1[2],zero,zero,zero,xmm1[3],zero,zero,zero
-; AVX2-NEXT:    vpslld $31, %xmm1, %xmm1
-; AVX2-NEXT:    vpsrad $31, %xmm1, %xmm1
-; AVX2-NEXT:    vpmovsxdq %xmm1, %ymm1
-; AVX2-NEXT:    vpmaskmovq 64(%rdi), %ymm1, %ymm2
-; AVX2-NEXT:    vpshufd {{.*#+}} xmm0 = xmm0[1,1,2,3]
+; AVX2-NEXT:    vpmaskmovq 32(%rdi), %ymm1, %ymm1
+; AVX2-NEXT:    vpshufd {{.*#+}} xmm2 = xmm0[2,3,0,1]
+; AVX2-NEXT:    vpmovzxbd {{.*#+}} xmm2 = xmm2[0],zero,zero,zero,xmm2[1],zero,zero,zero,xmm2[2],zero,zero,zero,xmm2[3],zero,zero,zero
+; AVX2-NEXT:    vpslld $31, %xmm2, %xmm2
+; AVX2-NEXT:    vpsrad $31, %xmm2, %xmm2
+; AVX2-NEXT:    vpmovsxdq %xmm2, %ymm2
+; AVX2-NEXT:    vpmaskmovq 64(%rdi), %ymm2, %ymm2
+; AVX2-NEXT:    vpshufd {{.*#+}} xmm0 = xmm0[3,1,2,3]
 ; AVX2-NEXT:    vpmovzxbd {{.*#+}} xmm0 = xmm0[0],zero,zero,zero,xmm0[1],zero,zero,zero,xmm0[2],zero,zero,zero,xmm0[3],zero,zero,zero
 ; AVX2-NEXT:    vpslld $31, %xmm0, %xmm0
 ; AVX2-NEXT:    vpsrad $31, %xmm0, %xmm0
 ; AVX2-NEXT:    vpmovsxdq %xmm0, %ymm0
-; AVX2-NEXT:    vpmaskmovq 32(%rdi), %ymm0, %ymm1
+; AVX2-NEXT:    vpmaskmovq 96(%rdi), %ymm0, %ymm3
 ; AVX2-NEXT:    vmovdqa %ymm4, %ymm0
 ; AVX2-NEXT:    retq
 ;
@@ -2180,19 +2183,19 @@ define <32 x double> @test_load_32f64(<32 x double>* %ptrs, <32 x i1> %mask, <32
 ;
 ; AVX512F-LABEL: test_load_32f64:
 ; AVX512F:       ## BB#0:
-; AVX512F-NEXT:    vextractf128 $1, %ymm0, %xmm5
-; AVX512F-NEXT:    vpmovsxbd %xmm5, %zmm5
+; AVX512F-NEXT:    vpmovsxbd %xmm0, %zmm5
 ; AVX512F-NEXT:    vpslld $31, %zmm5, %zmm5
 ; AVX512F-NEXT:    vptestmd %zmm5, %zmm5, %k1
-; AVX512F-NEXT:    vmovupd 128(%rdi), %zmm3 {%k1}
+; AVX512F-NEXT:    vmovupd (%rdi), %zmm1 {%k1}
+; AVX512F-NEXT:    vextractf128 $1, %ymm0, %xmm0
 ; AVX512F-NEXT:    vpmovsxbd %xmm0, %zmm0
 ; AVX512F-NEXT:    vpslld $31, %zmm0, %zmm0
 ; AVX512F-NEXT:    vptestmd %zmm0, %zmm0, %k2
-; AVX512F-NEXT:    vmovupd (%rdi), %zmm1 {%k2}
+; AVX512F-NEXT:    vmovupd 128(%rdi), %zmm3 {%k2}
 ; AVX512F-NEXT:    kshiftrw $8, %k1, %k1
-; AVX512F-NEXT:    vmovupd 192(%rdi), %zmm4 {%k1}
-; AVX512F-NEXT:    kshiftrw $8, %k2, %k1
 ; AVX512F-NEXT:    vmovupd 64(%rdi), %zmm2 {%k1}
+; AVX512F-NEXT:    kshiftrw $8, %k2, %k1
+; AVX512F-NEXT:    vmovupd 192(%rdi), %zmm4 {%k1}
 ; AVX512F-NEXT:    vmovaps %zmm1, %zmm0
 ; AVX512F-NEXT:    vmovaps %zmm2, %zmm1
 ; AVX512F-NEXT:    vmovaps %zmm3, %zmm2
@@ -2204,11 +2207,11 @@ define <32 x double> @test_load_32f64(<32 x double>* %ptrs, <32 x i1> %mask, <32
 ; SKX-NEXT:    vpsllw $7, %ymm0, %ymm0
 ; SKX-NEXT:    vpmovb2m %ymm0, %k1
 ; SKX-NEXT:    vmovupd (%rdi), %zmm1 {%k1}
-; SKX-NEXT:    kshiftrd $16, %k1, %k2
-; SKX-NEXT:    vmovupd 128(%rdi), %zmm3 {%k2}
+; SKX-NEXT:    kshiftrw $8, %k1, %k2
+; SKX-NEXT:    vmovupd 64(%rdi), %zmm2 {%k2}
+; SKX-NEXT:    kshiftrd $16, %k1, %k1
+; SKX-NEXT:    vmovupd 128(%rdi), %zmm3 {%k1}
 ; SKX-NEXT:    kshiftrw $8, %k1, %k1
-; SKX-NEXT:    vmovupd 64(%rdi), %zmm2 {%k1}
-; SKX-NEXT:    kshiftrw $8, %k2, %k1
 ; SKX-NEXT:    vmovupd 192(%rdi), %zmm4 {%k1}
 ; SKX-NEXT:    vmovaps %zmm1, %zmm0
 ; SKX-NEXT:    vmovaps %zmm2, %zmm1

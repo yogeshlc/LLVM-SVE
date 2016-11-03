@@ -224,6 +224,10 @@ unsigned TargetTransformInfo::getRegisterBitWidth(bool Vector) const {
   return TTIImpl->getRegisterBitWidth(Vector);
 }
 
+unsigned TargetTransformInfo::getRegisterBitWidthUpperBound(bool Vector) const {
+  return TTIImpl->getRegisterBitWidthUpperBound(Vector);
+}
+
 unsigned TargetTransformInfo::getCacheLineSize() const {
   return TTIImpl->getCacheLineSize();
 }
@@ -302,6 +306,14 @@ int TargetTransformInfo::getMemoryOpCost(unsigned Opcode, Type *Src,
   int Cost = TTIImpl->getMemoryOpCost(Opcode, Src, Alignment, AddressSpace);
   assert(Cost >= 0 && "TTI should not produce negative costs!");
   return Cost;
+}
+
+unsigned TargetTransformInfo::getVectorMemoryOpCost(unsigned Opcode, Type *Src,
+                                              Value *Ptr, unsigned Alignment,
+                                              unsigned AddressSpace,
+                                              const MemAccessInfo &Info) const {
+  return TTIImpl->getVectorMemoryOpCost(Opcode, Src, Ptr, Alignment,
+                                        AddressSpace, Info);
 }
 
 int TargetTransformInfo::getMaskedMemoryOpCost(unsigned Opcode, Type *Src,
@@ -387,9 +399,43 @@ Value *TargetTransformInfo::getOrCreateResultFromMemIntrinsic(
   return TTIImpl->getOrCreateResultFromMemIntrinsic(Inst, ExpectedType);
 }
 
+bool TargetTransformInfo::hasVectorMemoryOp(unsigned Opcode, Type *Ty,
+                                            const MemAccessInfo &Info) const {
+  return TTIImpl->hasVectorMemoryOp(Opcode, Ty, Info);
+}
+
+bool TargetTransformInfo::canReduceInVector(const RecurrenceDescriptor &Desc,
+                                            bool NoNaN) const {
+  return TTIImpl->canReduceInVector(Desc, NoNaN);
+}
+
+Value* TargetTransformInfo::getReductionIntrinsic(IRBuilder<> &Builder,
+                                           const RecurrenceDescriptor &Desc,
+                                           bool NoNaN, Value *Src) const {
+  return TTIImpl->getReductionIntrinsic(Builder, Desc, NoNaN, Src);
+}
+
+Value*
+TargetTransformInfo::getOrderedReductionIntrinsic(IRBuilder<> &Builder,
+                                                  const RecurrenceDescriptor &Desc,
+                                                  bool NoNaN, Value *Src,
+                                                  Value  *Start,
+                                                  Value *Predicate) const {
+  return TTIImpl->getOrderedReductionIntrinsic(Builder, Desc, NoNaN, Src, Start,
+                                               Predicate);
+}
+
 bool TargetTransformInfo::areInlineCompatible(const Function *Caller,
                                               const Function *Callee) const {
   return TTIImpl->areInlineCompatible(Caller, Callee);
+}
+
+bool TargetTransformInfo::canVectorizeNonUnitStrides(bool forceFixedWidth) const {
+  return TTIImpl->canVectorizeNonUnitStrides(forceFixedWidth);
+}
+
+bool TargetTransformInfo::vectorizePreventedSLForwarding() const {
+  return TTIImpl->vectorizePreventedSLForwarding();
 }
 
 TargetTransformInfo::Concept::~Concept() {}

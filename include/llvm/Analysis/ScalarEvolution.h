@@ -45,6 +45,7 @@ namespace llvm {
   class ScalarEvolution;
   class DataLayout;
   class TargetLibraryInfo;
+  class TargetTransformInfo;
   class LLVMContext;
   class Operator;
   class SCEV;
@@ -183,7 +184,7 @@ namespace llvm {
 
   protected:
     SCEVPredicateKind Kind;
-    ~SCEVPredicate() = default;
+    virtual ~SCEVPredicate() {}
     SCEVPredicate(const SCEVPredicate&) = default;
     SCEVPredicate &operator=(const SCEVPredicate&) = default;
 
@@ -482,6 +483,10 @@ namespace llvm {
     /// The loop information for the function we are currently analyzing.
     ///
     LoopInfo &LI;
+
+    /// TLI - The target transform information for the target we are targeting.
+    ///
+    TargetTransformInfo &TTI;
 
     /// This SCEV is used to represent unknown trip counts and things.
     std::unique_ptr<SCEVCouldNotCompute> CouldNotCompute;
@@ -1148,7 +1153,8 @@ namespace llvm {
 
   public:
     ScalarEvolution(Function &F, TargetLibraryInfo &TLI, AssumptionCache &AC,
-                    DominatorTree &DT, LoopInfo &LI);
+                    DominatorTree &DT, LoopInfo &LI,
+                    TargetTransformInfo &TTI);
     ~ScalarEvolution();
     ScalarEvolution(ScalarEvolution &&Arg);
 

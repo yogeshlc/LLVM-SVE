@@ -53,9 +53,22 @@ unsigned AArch64InstrInfo::GetInstSizeInBytes(const MachineInstr *MI) const {
   case TargetOpcode::IMPLICIT_DEF:
   case TargetOpcode::KILL:
     return 0;
+  case TargetOpcode::BUNDLE:
+    return getInstBundleLength(MI);
   }
 
   llvm_unreachable("GetInstSizeInBytes()- Unable to determin insn size");
+}
+
+unsigned AArch64InstrInfo::getInstBundleLength(const MachineInstr *MI) const {
+  unsigned Size = 0;
+  MachineBasicBlock::const_instr_iterator I = MI->getIterator();
+  MachineBasicBlock::const_instr_iterator E = MI->getParent()->instr_end();
+  while (++I != E && I->isInsideBundle()) {
+    assert(!I->isBundle() && "No nested bundle!");
+    Size += GetInstSizeInBytes(&*I);
+  }
+  return Size;
 }
 
 static void parseCondBranch(MachineInstr *LastInst, MachineBasicBlock *&Target,
@@ -686,6 +699,13 @@ bool AArch64InstrInfo::analyzeCompare(const MachineInstr *MI, unsigned &SrcReg,
   switch (MI->getOpcode()) {
   default:
     break;
+  case AArch64::PTEST_PP:
+    SrcReg  = MI->getOperand(0).getReg();
+    SrcReg2 = MI->getOperand(1).getReg();
+    // Not sure about the mask and value for now...
+    CmpMask = ~0;
+    CmpValue = 0;
+    return true;
   case AArch64::SUBSWrr:
   case AArch64::SUBSWrs:
   case AArch64::SUBSWrx:
@@ -864,6 +884,110 @@ static bool areCFlagsAccessedBetweenInstrs(MachineInstr *From, MachineInstr *To,
   return false;
 }
 
+/// optimizePTestInstr - Attempt to remove a ptest of a predicate-generating
+/// operation which could set the flags in an identical manner
+///
+static bool optimizePTestInstr(MachineInstr *PTest, unsigned MaskReg,
+                               unsigned PredReg, const MachineRegisterInfo *MRI,
+                               const TargetRegisterInfo *TRI,
+                               const TargetInstrInfo *TII) {
+  auto *Mask = MRI->getUniqueVRegDef(MaskReg);
+  auto *Pred = MRI->getUniqueVRegDef(PredReg);
+  auto NewOp = Pred->getOpcode();
+  bool OpChanged = false;
+
+  switch (Pred->getOpcode()) {
+  case AArch64::BRKB_PPzP:
+  case AArch64::BRKPB_PPzPP: {
+    // Op 0 is chain, 1 is the mask, 2 the previous predicate to
+    // propagate, 3 the new predicate.
+
+    // Check to see if our mask is the same as the brkpb's. If
+    // not the resulting flag bits may be different and we
+    // can't remove the ptest.
+    auto *PredMask = MRI->getUniqueVRegDef(Pred->getOperand(1).getReg());
+    if (Mask != PredMask)
+      return false;
+
+    // Switch to the new opcode
+    NewOp = Pred->getOpcode() == AArch64::BRKB_PPzP ?
+                                 AArch64::BRKBS_PPzP : AArch64::BRKPBS_PPzPP;
+    OpChanged = true;
+    break;
+  }
+  case AArch64::BRKN_PPzP: {
+    auto *PredMask = MRI->getUniqueVRegDef(Pred->getOperand(1).getReg());
+    if (Mask != PredMask)
+      return false;
+
+    NewOp = AArch64::BRKNS_PPzP;
+    OpChanged = true;
+    break;
+  }
+  case AArch64::WHILELO_PWW_B:
+  case AArch64::WHILELO_PWW_H:
+  case AArch64::WHILELO_PWW_S:
+  case AArch64::WHILELO_PWW_D:
+  case AArch64::WHILELO_PXX_B:
+  case AArch64::WHILELO_PXX_H:
+  case AArch64::WHILELO_PXX_S:
+  case AArch64::WHILELO_PXX_D: {
+    auto MaskOp = Mask->getOpcode();
+    if ((MaskOp != AArch64::PTRUE_B && MaskOp != AArch64::PTRUE_H &&
+         MaskOp != AArch64::PTRUE_S && MaskOp != AArch64::PTRUE_D) ||
+        (Mask->getOperand(1).getImm() != 31ll))
+      return false;
+
+    // 'while' always sets the flags, so no need to switch to a new opcode
+    break;
+  }
+  default:
+    // Bail out if we don't recognize the input
+    return false;
+  }
+
+  // If the predicate is in a different block (possibly because its been
+  // hoisted out), then assume the flags are set in between statements.
+  if (Pred->getParent() != PTest->getParent())
+    return false;
+
+  // If another instruction between the propagation and test sets the
+  // flags, don't remove the ptest.
+  MachineBasicBlock::iterator I = Pred, E = PTest;
+  ++I; // Skip past the predicate op itself.
+  for (; I != E; ++I) {
+    const MachineInstr &Inst = *I;
+
+    // TODO: If the ptest flags are unused, we could still remove it.
+    if (Inst.modifiesRegister(AArch64::NZCV, TRI))
+      return false;
+  }
+
+  // If we've gotten past all the checks, it's safe to remove the ptest
+  // and use the flag-setting form of brkpb.
+  Pred->setDesc(TII->get(NewOp));
+  PTest->eraseFromParent();
+  if (OpChanged) {
+    bool succeeded = UpdateOperandRegClass(Pred);
+    (void)succeeded;
+    assert(succeeded && "Operands have incompatible register classes!");
+    Pred->addRegisterDefined(AArch64::NZCV, TRI);
+  }
+
+  // Ensure that the flags def is live.
+  if (Pred->registerDefIsDead(AArch64::NZCV, TRI)) {
+    unsigned i = 0, e = Pred->getNumOperands();
+    for (; i != e; ++i) {
+      MachineOperand &MO = Pred->getOperand(i);
+      if (MO.isReg() && MO.isDef() && MO.getReg() == AArch64::NZCV) {
+        MO.setIsDead(false);
+        break;
+      }
+    }
+  }
+  return true;
+}
+
 /// Try to optimize a compare instruction. A compare instruction is an
 /// instruction which produces AArch64::NZCV. It can be truly compare instruction
 /// when there are no uses of its destination register.
@@ -900,6 +1024,10 @@ bool AArch64InstrInfo::optimizeCompareInstr(
     assert(succeeded && "Some operands reg class are incompatible!");
     return true;
   }
+
+  if (CmpInstr->getOpcode() == AArch64::PTEST_PP)
+    return optimizePTestInstr(CmpInstr, SrcReg, SrcReg2, MRI,
+                              &getRegisterInfo(), this);
 
   // Continue only if we have a "ri" where immediate is zero.
   // FIXME:CmpValue has already been converted to 0 or 1 in analyzeCompare
@@ -1350,6 +1478,11 @@ unsigned AArch64InstrInfo::isLoadFromStackSlot(const MachineInstr *MI,
   case AArch64::LDRSui:
   case AArch64::LDRDui:
   case AArch64::LDRQui:
+  case AArch64::LDR_PXI:
+  case AArch64::LDR_ZXI:
+  case AArch64::LDR_ZZXI:
+  case AArch64::LDR_ZZZXI:
+  case AArch64::LDR_ZZZZXI:
     if (MI->getOperand(0).getSubReg() == 0 && MI->getOperand(1).isFI() &&
         MI->getOperand(2).isImm() && MI->getOperand(2).getImm() == 0) {
       FrameIndex = MI->getOperand(1).getIndex();
@@ -1373,6 +1506,11 @@ unsigned AArch64InstrInfo::isStoreToStackSlot(const MachineInstr *MI,
   case AArch64::STRSui:
   case AArch64::STRDui:
   case AArch64::STRQui:
+  case AArch64::STR_PXI:
+  case AArch64::STR_ZXI:
+  case AArch64::STR_ZZXI:
+  case AArch64::STR_ZZZXI:
+  case AArch64::STR_ZZZZXI:
     if (MI->getOperand(0).getSubReg() == 0 && MI->getOperand(1).isFI() &&
         MI->getOperand(2).isImm() && MI->getOperand(2).getImm() == 0) {
       FrameIndex = MI->getOperand(1).getIndex();
@@ -1955,6 +2093,27 @@ void AArch64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     return;
   }
 
+  // Copy a Predicate register by ORRing with itself.
+  if (AArch64::PPRRegClass.contains(DestReg) &&
+      AArch64::PPRRegClass.contains(SrcReg)) {
+    assert(Subtarget.hasSVE() && "Unexpected SVE register.");
+    BuildMI(MBB, I, DL, get(AArch64::ORR_PPzPP), DestReg)
+      .addReg(SrcReg) // Pg
+      .addReg(SrcReg)
+      .addReg(SrcReg, getKillRegState(KillSrc));
+    return;
+  }
+
+  // Copy a Z register by ORRing with itself.
+  if (AArch64::ZPRRegClass.contains(DestReg) &&
+      AArch64::ZPRRegClass.contains(SrcReg)) {
+    assert(Subtarget.hasSVE() && "Unexpected SVE register.");
+    BuildMI(MBB, I, DL, get(AArch64::ORR_ZZZ), DestReg)
+      .addReg(SrcReg)
+      .addReg(SrcReg, getKillRegState(KillSrc));
+    return;
+  }
+
   if (AArch64::GPR64spRegClass.contains(DestReg) &&
       (AArch64::GPR64spRegClass.contains(SrcReg) || SrcReg == AArch64::XZR)) {
     if (DestReg == AArch64::SP || SrcReg == AArch64::SP) {
@@ -2029,6 +2188,35 @@ void AArch64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
       AArch64::QQRegClass.contains(SrcReg)) {
     static const unsigned Indices[] = { AArch64::qsub0, AArch64::qsub1 };
     copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, AArch64::ORRv16i8,
+                     Indices);
+    return;
+  }
+
+  // Copy a ZPR2 register pair by copying the individual sub-registers.
+  if (AArch64::ZPR2RegClass.contains(DestReg) &&
+      AArch64::ZPR2RegClass.contains(SrcReg)) {
+    static const unsigned Indices[] = { AArch64::zsub0, AArch64::zsub1 };
+    copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, AArch64::ORR_ZZZ,
+                     Indices);
+    return;
+  }
+
+  // Copy a ZPR3 register pair by copying the individual sub-registers.
+  if (AArch64::ZPR3RegClass.contains(DestReg) &&
+      AArch64::ZPR3RegClass.contains(SrcReg)) {
+    static const unsigned Indices[] = { AArch64::zsub0, AArch64::zsub1,
+                                        AArch64::zsub2 };
+    copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, AArch64::ORR_ZZZ,
+                     Indices);
+    return;
+  }
+
+  // Copy a ZPR4 register pair by copying the individual sub-registers.
+  if (AArch64::ZPR4RegClass.contains(DestReg) &&
+      AArch64::ZPR4RegClass.contains(SrcReg)) {
+    static const unsigned Indices[] = { AArch64::zsub0, AArch64::zsub1,
+                                        AArch64::zsub2, AArch64::zsub3 };
+    copyPhysRegTuple(MBB, I, DL, DestReg, SrcReg, KillSrc, AArch64::ORR_ZZZ,
                      Indices);
     return;
   }
@@ -2270,6 +2458,26 @@ void AArch64InstrInfo::storeRegToStackSlot(
     }
     break;
   }
+  if (AArch64::PPRRegClass.hasSubClassEq(RC)) {
+    assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+    Opc = AArch64::STR_PXI;
+  } else if (AArch64::ZPRRegClass.hasSubClassEq(RC)) {
+    assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+    Opc = AArch64::STR_ZXI;
+  } else if (AArch64::ZPR2RegClass.hasSubClassEq(RC)) {
+    // This function relies on spills constructing a single MI (see
+    // InlineSpiller), but ST2,ST3,ST4 require a predicate input, which we don't
+    // currently have.  STR_ZZXI and friends are pseudo instructions which get
+    // expanded to a PTRUE + ST2 later
+    assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+    Opc = AArch64::STR_ZZXI;
+  } else if (AArch64::ZPR3RegClass.hasSubClassEq(RC)) {
+    assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+    Opc = AArch64::STR_ZZZXI;
+  } else if (AArch64::ZPR4RegClass.hasSubClassEq(RC)) {
+    assert(Subtarget.hasSVE() && "Unexpected register store without SVE");
+    Opc = AArch64::STR_ZZZZXI;
+  }
   assert(Opc && "Unknown register class");
 
   const MachineInstrBuilder MI = BuildMI(MBB, MBBI, DL, get(Opc))
@@ -2373,6 +2581,26 @@ void AArch64InstrInfo::loadRegFromStackSlot(
       Offset = false;
     }
     break;
+  }
+  if (AArch64::PPRRegClass.hasSubClassEq(RC)) {
+    assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+    Opc = AArch64::LDR_PXI;
+  } else if (AArch64::ZPRRegClass.hasSubClassEq(RC)) {
+    assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+    Opc = AArch64::LDR_ZXI;
+  } else if (AArch64::ZPR2RegClass.hasSubClassEq(RC)) {
+    assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+    // This function relies on fills constructing a single MI (see
+    // InlineSpiller), but LD2,LD3,LD4 require a predicate input, which we don't
+    // currently have.  LDR_ZZXI and friends are pseudo instructions which get
+    // expanded to a PTRUE + LD2 later
+    Opc = AArch64::LDR_ZZXI;
+  } else if (AArch64::ZPR3RegClass.hasSubClassEq(RC)) {
+    assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+    Opc = AArch64::LDR_ZZZXI;
+  } else if (AArch64::ZPR4RegClass.hasSubClassEq(RC)) {
+    assert(Subtarget.hasSVE() && "Unexpected register load without SVE");
+    Opc = AArch64::LDR_ZZZZXI;
   }
   assert(Opc && "Unknown register class");
 
@@ -2481,12 +2709,76 @@ MachineInstr *AArch64InstrInfo::foldMemoryOperandImpl(
   return nullptr;
 }
 
+static bool isSVEScaledImmInstruction(unsigned Opcode) {
+  switch (Opcode) {
+    case AArch64::LD1B_B_IMM:
+    case AArch64::LD1B_H_IMM:
+    case AArch64::LD1B_S_IMM:
+    case AArch64::LD1B_D_IMM:
+    case AArch64::LD1SB_H_IMM:
+    case AArch64::LD1SB_S_IMM:
+    case AArch64::LD1SB_D_IMM:
+    case AArch64::LD1H_H_IMM:
+    case AArch64::LD1H_S_IMM:
+    case AArch64::LD1H_D_IMM:
+    case AArch64::LD1SH_S_IMM:
+    case AArch64::LD1SH_D_IMM:
+    case AArch64::LD1W_S_IMM:
+    case AArch64::LD1W_D_IMM:
+    case AArch64::LD1SW_D_IMM:
+    case AArch64::LD1D_D_IMM:
+    case AArch64::ST1B_B_IMM:
+    case AArch64::ST1B_H_IMM:
+    case AArch64::ST1B_S_IMM:
+    case AArch64::ST1B_D_IMM:
+    case AArch64::ST1H_H_IMM:
+    case AArch64::ST1H_S_IMM:
+    case AArch64::ST1H_D_IMM:
+    case AArch64::ST1W_S_IMM:
+    case AArch64::ST1W_D_IMM:
+    case AArch64::ST1D_D_IMM:
+    case AArch64::LDR_ZXI:
+    case AArch64::LDR_ZZXI:
+    case AArch64::LDR_ZZZXI:
+    case AArch64::LDR_ZZZZXI:
+    case AArch64::STR_ZXI:
+    case AArch64::STR_ZZXI:
+    case AArch64::STR_ZZZXI:
+    case AArch64::STR_ZZZZXI:
+    case AArch64::LDR_PXI:
+    case AArch64::STR_PXI:
+      return true;
+    default:
+      return false;
+  }
+  return false;
+}
+
 int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI, int &Offset,
                                     bool *OutUseUnscaledOp,
                                     unsigned *OutUnscaledOp,
                                     int *EmittableOffset) {
+  unsigned MaskBits;
   int Scale = 1;
+  bool IsSVE = false;
   bool IsSigned = false;
+
+  // Special case for loads/stores of SVE vectors from non-SVE stack
+  // addresses. The scaling in the addressing mode 'times VL' should
+  // not happen, since the offset to the stack object is in plain
+  // bytes. Returning false forces the base addressed to be materialized
+  // and the SVE load/store to load with immediate 0.
+  if (isSVEScaledImmInstruction(MI.getOpcode())) {
+    auto *MFI = MI.getParent()->getParent()->getFrameInfo();
+    for (unsigned I=0; I < MI.getNumOperands(); ++I) {
+      if (MI.getOperand(I).isFI()) {
+        if (Offset != 0 &&
+            !MFI->getObjectRegion(MI.getOperand(I).getIndex()))
+          return AArch64FrameOffsetCannotUpdate;
+      }
+    }
+  }
+
   // The ImmIdx should be changed case by case if it is not 2.
   unsigned ImmIdx = 2;
   unsigned UnscaledOp = 0;
@@ -2574,7 +2866,6 @@ int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI, int &Offset,
     Scale = 4;
     UnscaledOp = AArch64::LDURSWi;
     break;
-
   case AArch64::STRXui:
     Scale = 8;
     UnscaledOp = AArch64::STURXi;
@@ -2644,7 +2935,6 @@ int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI, int &Offset,
     IsSigned = true;
     Scale = 4;
     break;
-
   case AArch64::LDURXi:
   case AArch64::LDURWi:
   case AArch64::LDURBi:
@@ -2670,6 +2960,113 @@ int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI, int &Offset,
   case AArch64::STURHHi:
     Scale = 1;
     break;
+  case AArch64::LD1B_B_IMM:
+  case AArch64::LD1B_H_IMM:
+  case AArch64::LD1B_S_IMM:
+  case AArch64::LD1B_D_IMM:
+  case AArch64::LD1SB_H_IMM:
+  case AArch64::LD1SB_S_IMM:
+  case AArch64::LD1SB_D_IMM:
+  case AArch64::LD1H_H_IMM:
+  case AArch64::LD1H_S_IMM:
+  case AArch64::LD1H_D_IMM:
+  case AArch64::LD1SH_S_IMM:
+  case AArch64::LD1SH_D_IMM:
+  case AArch64::LD1W_S_IMM:
+  case AArch64::LD1W_D_IMM:
+  case AArch64::LD1SW_D_IMM:
+  case AArch64::LD1D_D_IMM:
+  case AArch64::ST1B_B_IMM:
+  case AArch64::ST1B_H_IMM:
+  case AArch64::ST1B_S_IMM:
+  case AArch64::ST1B_D_IMM:
+  case AArch64::ST1H_H_IMM:
+  case AArch64::ST1H_S_IMM:
+  case AArch64::ST1H_D_IMM:
+  case AArch64::ST1W_S_IMM:
+  case AArch64::ST1W_D_IMM:
+  case AArch64::ST1D_D_IMM:
+    IsSVE = true;
+    IsSigned = true;
+    MaskBits = 4;
+    Scale = 16;
+    ImmIdx = 3;
+    break;
+  case AArch64::LDR_PXI:
+  case AArch64::STR_PXI:
+    IsSVE = true;
+    IsSigned = true;
+    MaskBits = 9;
+    Scale = 2;
+    break;
+  case AArch64::LDR_ZXI:
+  case AArch64::STR_ZXI:
+    IsSVE = true;
+    IsSigned = true;
+    MaskBits = 9;
+    Scale = 16;
+    break;
+  case AArch64::STR_ZZXI:
+  case AArch64::LDR_ZZXI:
+    IsSVE = true;
+    IsSigned = true;
+    MaskBits = 4;
+    Scale = 32;
+    break;
+  case AArch64::STR_ZZZXI:
+  case AArch64::LDR_ZZZXI:
+    IsSVE = true;
+    IsSigned = true;
+    MaskBits = 4;
+    Scale = 48;
+    break;
+  case AArch64::STR_ZZZZXI:
+  case AArch64::LDR_ZZZZXI:
+    IsSVE = true;
+    IsSigned = true;
+    MaskBits = 4;
+    Scale = 64;
+    break;
+  case AArch64::LD1RB:
+  case AArch64::LD1RB_H:
+  case AArch64::LD1RB_S:
+  case AArch64::LD1RB_D:
+  case AArch64::LD1RSB_H:
+  case AArch64::LD1RSB_S:
+  case AArch64::LD1RSB_D:
+    IsSVE = true;
+    IsSigned = false;
+    MaskBits = 6;
+    Scale = 1;
+    ImmIdx = 3;
+    break;
+  case AArch64::LD1RH:
+  case AArch64::LD1RH_S:
+  case AArch64::LD1RH_D:
+  case AArch64::LD1RSH_S:
+  case AArch64::LD1RSH_D:
+    IsSVE = true;
+    IsSigned = false;
+    MaskBits = 6;
+    Scale = 2;
+    ImmIdx = 3;
+    break;
+  case AArch64::LD1RW:
+  case AArch64::LD1RW_D:
+  case AArch64::LD1RSW:
+    IsSVE = true;
+    IsSigned = false;
+    MaskBits = 6;
+    Scale = 4;
+    ImmIdx = 3;
+    break;
+  case AArch64::LD1RD:
+    IsSVE = true;
+    IsSigned = false;
+    MaskBits = 6;
+    Scale = 8;
+    ImmIdx = 3;
+    break;
   }
 
   Offset += MI.getOperand(ImmIdx).getImm() * Scale;
@@ -2683,8 +3080,11 @@ int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI, int &Offset,
 
   // Use an unscaled addressing mode if the instruction has a negative offset
   // (or if the instruction is already using an unscaled addressing mode).
-  unsigned MaskBits;
-  if (IsSigned) {
+  int Misalignment = 0;
+  if (IsSVE) {
+    Misalignment = Offset % Scale;
+    Offset /= Scale;
+  } else if (IsSigned) {
     // ldp/stp instructions.
     MaskBits = 7;
     Offset /= Scale;
@@ -2711,17 +3111,24 @@ int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI, int &Offset,
       *EmittableOffset = NewOff;
     Offset = (Offset - NewOff) * Scale;
   }
+
+  if (useUnscaledOp && isSVEScaledImmInstruction(MI.getOpcode())) {
+    Offset += Misalignment;
+    useUnscaledOp = false;
+  }
   if (OutUseUnscaledOp)
     *OutUseUnscaledOp = useUnscaledOp;
   if (OutUnscaledOp)
     *OutUnscaledOp = UnscaledOp;
+
   return AArch64FrameOffsetCanUpdate |
          (Offset == 0 ? AArch64FrameOffsetIsLegal : 0);
 }
 
 bool llvm::rewriteAArch64FrameIndex(MachineInstr &MI, unsigned FrameRegIdx,
                                     unsigned FrameReg, int &Offset,
-                                    const AArch64InstrInfo *TII) {
+                                    const AArch64InstrInfo *TII,
+                                    bool IsTemporaryFrameReg) {
   unsigned Opcode = MI.getOpcode();
   unsigned ImmIdx = FrameRegIdx + 1;
 
@@ -2730,6 +3137,7 @@ bool llvm::rewriteAArch64FrameIndex(MachineInstr &MI, unsigned FrameRegIdx,
     emitFrameOffset(*MI.getParent(), MI, MI.getDebugLoc(),
                     MI.getOperand(0).getReg(), FrameReg, Offset, TII,
                     MachineInstr::NoFlags, (Opcode == AArch64::ADDSXri));
+    MI.getPrevNode()->getOperand(1).setIsKill(IsTemporaryFrameReg);
     MI.eraseFromParent();
     Offset = 0;
     return true;
@@ -2743,7 +3151,8 @@ bool llvm::rewriteAArch64FrameIndex(MachineInstr &MI, unsigned FrameRegIdx,
   if (Status & AArch64FrameOffsetCanUpdate) {
     if (Status & AArch64FrameOffsetIsLegal)
       // Replace the FrameIndex with FrameReg.
-      MI.getOperand(FrameRegIdx).ChangeToRegister(FrameReg, false);
+      MI.getOperand(FrameRegIdx).ChangeToRegister(FrameReg, false, false,
+                                                  IsTemporaryFrameReg);
     if (UseUnscaledOp)
       MI.setDesc(TII->get(UnscaledOp));
 

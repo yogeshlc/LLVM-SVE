@@ -282,6 +282,8 @@ public:
 
   unsigned getRegisterBitWidth(bool Vector) { return 32; }
 
+  unsigned getRegisterBitWidthUpperBound(bool Vector) { return 32; }
+
   unsigned getMaxInterleaveFactor(unsigned VF) { return 1; }
 
   unsigned getArithmeticInstrCost(

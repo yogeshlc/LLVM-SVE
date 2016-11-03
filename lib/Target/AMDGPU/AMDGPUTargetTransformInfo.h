@@ -81,6 +81,9 @@ public:
 
   unsigned getNumberOfRegisters(bool Vector);
   unsigned getRegisterBitWidth(bool Vector);
+  unsigned getRegisterBitWidthUpperBound(bool Vector) {
+    return getRegisterBitWidth(Vector);
+  }
   unsigned getMaxInterleaveFactor(unsigned VF);
 
   int getArithmeticInstrCost(

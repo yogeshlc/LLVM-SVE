@@ -66,6 +66,8 @@ void DAGTypeLegalizer::ScalarizeVectorResult(SDNode *N, unsigned ResNo) {
   case ISD::SETCC:             R = ScalarizeVecRes_SETCC(N); break;
   case ISD::UNDEF:             R = ScalarizeVecRes_UNDEF(N); break;
   case ISD::VECTOR_SHUFFLE:    R = ScalarizeVecRes_VECTOR_SHUFFLE(N); break;
+  case ISD::VECTOR_SHUFFLE_VAR:
+                               R = ScalarizeVec_VECTOR_SHUFFLE_VAR(N); break;
   case ISD::ANY_EXTEND:
   case ISD::BITREVERSE:
   case ISD::BSWAP:
@@ -376,6 +378,44 @@ SDValue DAGTypeLegalizer::ScalarizeVecRes_VECTOR_SHUFFLE(SDNode *N) {
   return GetScalarizedVector(N->getOperand(Op));
 }
 
+// Handle VECTOR_SHUFFLE_VARs in which the output and/or mask need
+// to be scalarized.  The first two inputs have the same type as the
+// output and so require scalarization iff the output does.
+SDValue DAGTypeLegalizer::ScalarizeVec_VECTOR_SHUFFLE_VAR(SDNode *N) {
+  SDLoc dl(N);
+  SDValue Op0 = N->getOperand(0);
+  SDValue Op1 = N->getOperand(1);
+  SDValue Mask = N->getOperand(2);
+  if (getTypeAction(Op0.getValueType()) ==
+      TargetLowering::TypeScalarizeVector) {
+    Op0 = GetScalarizedVector(Op0);
+    Op1 = GetScalarizedVector(Op1);
+  }
+  if (getTypeAction(Mask.getValueType()) == TargetLowering::TypeScalarizeVector)
+    Mask = GetScalarizedVector(Mask);
+  else
+    Mask = DAG.getNode(ISD::EXTRACT_VECTOR_ELT, dl,
+                       Mask.getValueType().getVectorElementType(),
+                       Mask, DAG.getConstant(0, dl,
+                           TLI.getVectorIdxTy(DAG.getDataLayout())));
+  // We want to select Op0 if Mask is 0 and Op1 if Mask is 1.  Convert the
+  // 0/1 Mask into a form that the target can use for a SELECT operation.
+  EVT SccVT = TLI.getSetCCResultType(DAG.getDataLayout(), *DAG.getContext(),
+                                     Mask.getValueType());
+  switch (TLI.getBooleanContents(false, false)) {
+  case TargetLowering::ZeroOrNegativeOneBooleanContent:
+    Mask = DAG.getNode(ISD::SIGN_EXTEND_INREG, dl, SccVT,
+                       Mask, DAG.getValueType(MVT::i1));
+    break;
+  case TargetLowering::ZeroOrOneBooleanContent:
+  case TargetLowering::UndefinedBooleanContent:
+    // The mask is already required to be 0 or 1.
+    Mask = DAG.getZExtOrTrunc(Mask, dl, SccVT);
+    break;
+  }
+  return DAG.getSelect(dl, Op0.getValueType(), Mask, Op1, Op0);
+}
+
 SDValue DAGTypeLegalizer::ScalarizeVecRes_VSETCC(SDNode *N) {
   assert(N->getValueType(0).isVector() &&
          N->getOperand(0).getValueType().isVector() &&
@@ -451,6 +491,9 @@ bool DAGTypeLegalizer::ScalarizeVectorOperand(SDNode *N, unsigned OpNo) {
       break;
     case ISD::VSELECT:
       Res = ScalarizeVecOp_VSELECT(N);
+      break;
+    case ISD::VECTOR_SHUFFLE_VAR:
+      Res = ScalarizeVec_VECTOR_SHUFFLE_VAR(N);
       break;
     case ISD::STORE:
       Res = ScalarizeVecOp_STORE(cast<StoreSDNode>(N), OpNo);
@@ -604,6 +647,8 @@ void DAGTypeLegalizer::SplitVectorResult(SDNode *N, unsigned ResNo) {
   case ISD::FCOPYSIGN:         SplitVecRes_FCOPYSIGN(N, Lo, Hi); break;
   case ISD::INSERT_VECTOR_ELT: SplitVecRes_INSERT_VECTOR_ELT(N, Lo, Hi); break;
   case ISD::SCALAR_TO_VECTOR:  SplitVecRes_SCALAR_TO_VECTOR(N, Lo, Hi); break;
+  case ISD::SERIES_VECTOR:     SplitVecRes_SERIES_VECTOR(N, Lo, Hi); break;
+  case ISD::SPLAT_VECTOR:      SplitVecRes_SPLAT_VECTOR(N, Lo, Hi); break;
   case ISD::SIGN_EXTEND_INREG: SplitVecRes_InregOp(N, Lo, Hi); break;
   case ISD::LOAD:
     SplitVecRes_LOAD(cast<LoadSDNode>(N), Lo, Hi);
@@ -619,6 +664,9 @@ void DAGTypeLegalizer::SplitVectorResult(SDNode *N, unsigned ResNo) {
     break;
   case ISD::VECTOR_SHUFFLE:
     SplitVecRes_VECTOR_SHUFFLE(cast<ShuffleVectorSDNode>(N), Lo, Hi);
+    break;
+  case ISD::VECTOR_SHUFFLE_VAR:
+    SplitVecRes_VECTOR_SHUFFLE_VAR(N, Lo, Hi);
     break;
 
   case ISD::ANY_EXTEND_VECTOR_INREG:
@@ -849,6 +897,10 @@ void DAGTypeLegalizer::SplitVecRes_INSERT_SUBVECTOR(SDNode *N, SDValue &Lo,
   SDValue SubVec = N->getOperand(1);
   SDValue Idx = N->getOperand(2);
   SDLoc dl(N);
+
+  assert(!Vec.getValueType().isScalableVector() &&
+         "This code does not yet implement VL scaled spills/fills");
+
   GetSplitVector(Vec, Lo, Hi);
 
   EVT VecVT = Vec.getValueType();
@@ -981,6 +1033,7 @@ void DAGTypeLegalizer::SplitVecRes_INSERT_VECTOR_ELT(SDNode *N, SDValue &Lo,
   SDValue Elt = N->getOperand(1);
   SDValue Idx = N->getOperand(2);
   SDLoc dl(N);
+
   GetSplitVector(Vec, Lo, Hi);
 
   if (ConstantSDNode *CIdx = dyn_cast<ConstantSDNode>(Idx)) {
@@ -1000,6 +1053,9 @@ void DAGTypeLegalizer::SplitVecRes_INSERT_VECTOR_ELT(SDNode *N, SDValue &Lo,
   // See if the target wants to custom expand this node.
   if (CustomLowerNode(N, N->getValueType(0), true))
     return;
+
+  assert(!Vec.getValueType().isScalableVector() &&
+         "This code does not yet implement VL scaled spills/fills");
 
   // Spill the vector to the stack.
   EVT VecVT = Vec.getValueType();
@@ -1040,6 +1096,31 @@ void DAGTypeLegalizer::SplitVecRes_SCALAR_TO_VECTOR(SDNode *N, SDValue &Lo,
   Hi = DAG.getUNDEF(HiVT);
 }
 
+void DAGTypeLegalizer::SplitVecRes_SERIES_VECTOR(SDNode *N, SDValue &Lo,
+                                                 SDValue &Hi) {
+  EVT LoVT, HiVT;
+  SDLoc dl(N);
+  std::tie(LoVT, HiVT) = DAG.GetSplitDestVTs(N->getValueType(0));
+  SDValue LoStart = N->getOperand(0);
+  SDValue Step = N->getOperand(1);
+  EVT CountVT = LoStart.getValueType();
+  SDValue EltCount = DAG.getNode(ISD::ELEMENT_COUNT, dl, CountVT,
+                                 DAG.getValueType(LoVT));
+  SDValue Mult = DAG.getNode(ISD::MUL, dl, CountVT, EltCount, Step);
+  SDValue HiStart = DAG.getNode(ISD::ADD, dl, CountVT, LoStart, Mult);
+  Lo = DAG.getNode(ISD::SERIES_VECTOR, dl, LoVT, LoStart, Step);
+  Hi = DAG.getNode(ISD::SERIES_VECTOR, dl, HiVT, HiStart, Step);
+}
+
+void DAGTypeLegalizer::SplitVecRes_SPLAT_VECTOR(SDNode *N, SDValue &Lo,
+                                                SDValue &Hi) {
+  EVT LoVT, HiVT;
+  SDLoc dl(N);
+  std::tie(LoVT, HiVT) = DAG.GetSplitDestVTs(N->getValueType(0));
+  Lo = DAG.getNode(ISD::SPLAT_VECTOR, dl, LoVT, N->getOperand(0));
+  Hi = DAG.getNode(ISD::SPLAT_VECTOR, dl, HiVT, N->getOperand(0));
+}
+
 void DAGTypeLegalizer::SplitVecRes_LOAD(LoadSDNode *LD, SDValue &Lo,
                                         SDValue &Hi) {
   assert(ISD::isUNINDEXEDLoad(LD) && "Indexed load during type legalization!");
@@ -1066,12 +1147,27 @@ void DAGTypeLegalizer::SplitVecRes_LOAD(LoadSDNode *LD, SDValue &Lo,
                    isInvariant, Alignment, AAInfo);
 
   unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
-  Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
-                    DAG.getConstant(IncrementSize, dl, Ptr.getValueType()));
+
+  SDValue BytesIncrement;
+  MachinePointerInfo MPI;
+  if (LoVT.isScalableVector()) {
+    SDValue NumberOfLanes = DAG.getNode(ISD::ELEMENT_COUNT, dl,
+                                        Ptr.getValueType(),
+                                        DAG.getValueType(Lo->getValueType(0)));
+    int64_t Size = Lo->getValueType(0).getVectorElementType().getStoreSize();
+    SDValue BytesPerLane = DAG.getConstant(Size, dl, Ptr.getValueType());
+    BytesIncrement = DAG.getNode(ISD::MUL, dl, Ptr.getValueType(),
+                                 NumberOfLanes, BytesPerLane);
+    MPI = LD->getPointerInfo();
+  } else {
+    BytesIncrement = DAG.getConstant(IncrementSize, dl, Ptr.getValueType());
+    MPI = LD->getPointerInfo().getWithOffset(IncrementSize);
+  }
+
+  Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr, BytesIncrement);
   Hi = DAG.getLoad(ISD::UNINDEXED, ExtType, HiVT, dl, Ch, Ptr, Offset,
-                   LD->getPointerInfo().getWithOffset(IncrementSize),
-                   HiMemVT, isVolatile, isNonTemporal, isInvariant, Alignment,
-                   AAInfo);
+                   MPI, HiMemVT, isVolatile, isNonTemporal, isInvariant,
+                   Alignment, AAInfo);
 
   // Build a factor node to remember that this load is independent of the
   // other one.
@@ -1127,9 +1223,21 @@ void DAGTypeLegalizer::SplitVecRes_MLOAD(MaskedLoadSDNode *MLD,
   Lo = DAG.getMaskedLoad(LoVT, dl, Ch, Ptr, MaskLo, Src0Lo, LoMemVT, MMO,
                          ExtType);
 
-  unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
-  Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
-                    DAG.getConstant(IncrementSize, dl, Ptr.getValueType()));
+  SDValue BytesIncrement;
+  if (LoVT.isScalableVector()) {
+    SDValue NumberOfLanes = DAG.getNode(ISD::ELEMENT_COUNT, dl,
+                                        Ptr.getValueType(),
+                                        DAG.getValueType(Lo->getValueType(0)));
+    int64_t Size = Lo->getValueType(0).getVectorElementType().getStoreSize();
+    SDValue BytesPerLane = DAG.getConstant(Size, dl, Ptr.getValueType());
+    BytesIncrement = DAG.getNode(ISD::MUL, dl, Ptr.getValueType(),
+                                 NumberOfLanes, BytesPerLane);
+  } else {
+    unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
+    BytesIncrement = DAG.getConstant(IncrementSize, dl, Ptr.getValueType());
+  }
+
+  Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr, BytesIncrement);
 
   MMO = DAG.getMachineFunction().
     getMachineMemOperand(MLD->getPointerInfo(),
@@ -1163,6 +1271,7 @@ void DAGTypeLegalizer::SplitVecRes_MGATHER(MaskedGatherSDNode *MGT,
   SDValue Src0 = MGT->getValue();
   SDValue Index = MGT->getIndex();
   unsigned Alignment = MGT->getOriginalAlignment();
+  ISD::LoadExtType ExtType = MGT->getExtensionType();
 
   // Split Mask operand
   SDValue MaskLo, MaskHi;
@@ -1194,12 +1303,12 @@ void DAGTypeLegalizer::SplitVecRes_MGATHER(MaskedGatherSDNode *MGT,
                          Alignment, MGT->getAAInfo(), MGT->getRanges());
 
   SDValue OpsLo[] = {Ch, Src0Lo, MaskLo, Ptr, IndexLo};
-  Lo = DAG.getMaskedGather(DAG.getVTList(LoVT, MVT::Other), LoVT, dl, OpsLo,
-                           MMO);
+  Lo = DAG.getMaskedGather(DAG.getVTList(LoVT, MVT::Other), LoMemVT, dl, OpsLo,
+                           MMO, ExtType);
 
   SDValue OpsHi[] = {Ch, Src0Hi, MaskHi, Ptr, IndexHi};
-  Hi = DAG.getMaskedGather(DAG.getVTList(HiVT, MVT::Other), HiVT, dl, OpsHi,
-                           MMO);
+  Hi = DAG.getMaskedGather(DAG.getVTList(HiVT, MVT::Other), HiMemVT, dl, OpsHi,
+                           MMO, ExtType);
 
   // Build a factor node to remember that this load is independent of the
   // other one.
@@ -1287,16 +1396,16 @@ void DAGTypeLegalizer::SplitVecRes_ExtendOp(SDNode *N, SDValue &Lo,
   // more effectively move in the right direction and prevent falling down
   // to scalarization in many cases due to the input vector being split too
   // far.
-  unsigned NumElements = SrcVT.getVectorNumElements();
-  if ((NumElements & 1) == 0 &&
+  auto EltCnt = SrcVT.getVectorElementCount();
+  if ((EltCnt.Min & 1) == 0 &&
       SrcVT.getSizeInBits() * 2 < DestVT.getSizeInBits()) {
     LLVMContext &Ctx = *DAG.getContext();
     EVT NewSrcVT = EVT::getVectorVT(
         Ctx, EVT::getIntegerVT(
                  Ctx, SrcVT.getVectorElementType().getSizeInBits() * 2),
-        NumElements);
-    EVT SplitSrcVT =
-        EVT::getVectorVT(Ctx, SrcVT.getVectorElementType(), NumElements / 2);
+        EltCnt);
+    EVT SplitSrcVT = EVT::getVectorVT(Ctx, SrcVT.getVectorElementType(),
+                                      EltCnt/2);
     EVT SplitLoVT, SplitHiVT;
     std::tie(SplitLoVT, SplitHiVT) = DAG.GetSplitDestVTs(NewSrcVT);
     if (TLI.isTypeLegal(SrcVT) && !TLI.isTypeLegal(SplitSrcVT) &&
@@ -1427,6 +1536,93 @@ void DAGTypeLegalizer::SplitVecRes_VECTOR_SHUFFLE(ShuffleVectorSDNode *N,
   }
 }
 
+/// Check if the node is a nodes is all zeros (used for splatting scalars into
+/// vectors in the VECTOR_SHUFFLE_VAR).
+static bool isASplatMask(SDValue &S) {
+
+  if (auto N = dyn_cast<ConstantSDNode>(S.getNode())) {
+    return N->isNullValue();
+  }
+
+  // Scalable vector specific code.
+  unsigned Opcode = S.getOpcode();
+
+  if (Opcode == ISD::SPLAT_VECTOR) {
+    auto *COp = dyn_cast<ConstantSDNode>(S.getOperand(0));
+    if (COp->isNullValue())
+      return true;
+  }
+
+  // Todo: Remove after SPLAT_VECTOR works?
+  if (Opcode != ISD::SERIES_VECTOR)
+    return false;
+
+  for (unsigned i = 0; i < 2; ++i) {
+    auto Op = S.getOperand(i);
+    auto N = dyn_cast<ConstantSDNode> (Op);
+    if (!(N && N->isNullValue()))
+      return false;
+  }
+
+  return true;
+}
+
+void DAGTypeLegalizer::SplitVecRes_VECTOR_SHUFFLE_VAR(SDNode *N,
+                                                      SDValue &Lo,
+                                                      SDValue &Hi) {
+  SDValue Inputs[4], Masks[2];
+  SDLoc dl(N);
+  // The low and high parts of the original input give four input vectors.
+  GetSplitVector(N->getOperand(0), Inputs[0], Inputs[1]);
+  GetSplitVector(N->getOperand(1), Inputs[2], Inputs[3]);
+  // The mask may or may not be split.  If it isn't, split it manually.
+  SDValue Mask = N->getOperand(2);
+  if (getTypeAction(Mask.getValueType()) == TargetLowering::TypeSplitVector)
+    GetSplitVector(Mask, Masks[0], Masks[1]);
+  else
+    std::tie(Masks[0], Masks[1]) = DAG.SplitVector(Mask, dl);
+
+  EVT VT = Inputs[0].getValueType();
+  EVT MaskVT = Masks[0].getValueType();
+
+  // first check if we can pull out a simple SPLAT
+  if (isASplatMask(Mask)) {
+    auto Undef = DAG.getUNDEF(VT);
+    auto ZeroMask = DAG.getConstant(0, dl, MaskVT);
+    // If it is a splat all it is needed is Input[0] and Masks[0]
+    Lo = DAG.getNode(ISD::VECTOR_SHUFFLE_VAR, dl, VT,
+                     Inputs[0], Undef, ZeroMask);
+    Hi = DAG.getNode(ISD::VECTOR_SHUFFLE_VAR, dl, VT,
+                     Inputs[0], Undef, ZeroMask);
+    return;
+  }
+
+  // Generic code for non-splat
+  EVT SccVT = TLI.getSetCCResultType(DAG.getDataLayout(), *DAG.getContext(),
+                                     MaskVT);
+  auto EltCnt = VT.getVectorElementCount();
+
+  SDValue Limit = DAG.getConstant(2 * EltCnt.Min, dl, MaskVT);
+  for (unsigned i = 0; i < 2; ++i) {
+    SDValue &HalfRes = i == 0 ? Lo : Hi;
+    // Reduce the mask so that each element is in the range [0, NumElts * 2).
+    // HalfOp0 contains the right answer for mask elements in that range
+    // and HalfOp1 contains the right answer for the rest.
+    SDValue HalfMask = DAG.getNode(ISD::UREM, dl, MaskVT, Masks[i], Limit);
+    SDValue HalfOp0 = DAG.getNode(ISD::VECTOR_SHUFFLE_VAR, dl, VT,
+                                  Inputs[0], Inputs[1], HalfMask);
+    SDValue HalfOp1 = DAG.getNode(ISD::VECTOR_SHUFFLE_VAR, dl, VT,
+                                  Inputs[2], Inputs[3], HalfMask);
+    // Get a vector of 0/1 selectors, with 1 selecting HalfOp0 and
+    // 0 selecting HalfOp1.
+    SDValue WhichOp = DAG.getSetCC(dl, SccVT, HalfMask, Masks[i], ISD::SETEQ);
+    // Use a VSELECT to get the final result.  It requires the selector
+    // to be a vector of i1s.
+    EVT CondVT = EVT::getVectorVT(*DAG.getContext(), MVT::i1, EltCnt);
+    WhichOp = DAG.getNode(ISD::TRUNCATE, dl, CondVT, WhichOp);
+    HalfRes = DAG.getNode(ISD::VSELECT, dl, VT, WhichOp, HalfOp0, HalfOp1);
+  }
+}
 
 //===----------------------------------------------------------------------===//
 //  Operand Vector Splitting
@@ -1454,14 +1650,14 @@ bool DAGTypeLegalizer::SplitVectorOperand(SDNode *N, unsigned OpNo) {
       N->dump(&DAG);
       dbgs() << "\n";
 #endif
-      report_fatal_error("Do not know how to split this operator's "
-                         "operand!\n");
+      report_fatal_error("Do not know how to split this operator's operand!\n");
 
     case ISD::SETCC:             Res = SplitVecOp_VSETCC(N); break;
     case ISD::BITCAST:           Res = SplitVecOp_BITCAST(N); break;
     case ISD::EXTRACT_SUBVECTOR: Res = SplitVecOp_EXTRACT_SUBVECTOR(N); break;
     case ISD::EXTRACT_VECTOR_ELT:Res = SplitVecOp_EXTRACT_VECTOR_ELT(N); break;
     case ISD::CONCAT_VECTORS:    Res = SplitVecOp_CONCAT_VECTORS(N); break;
+    case ISD::ELEMENT_COUNT:     Res = SplitVecOp_ELEMENT_COUNT(N); break;
     case ISD::TRUNCATE:
       Res = SplitVecOp_TruncateHelper(N);
       break;
@@ -1567,7 +1763,7 @@ SDValue DAGTypeLegalizer::SplitVecOp_UnaryOp(SDNode *N) {
   EVT InVT = Lo.getValueType();
 
   EVT OutVT = EVT::getVectorVT(*DAG.getContext(), ResVT.getVectorElementType(),
-                               InVT.getVectorNumElements());
+                               InVT.getVectorElementCount());
 
   Lo = DAG.getNode(N->getOpcode(), dl, OutVT, Lo);
   Hi = DAG.getNode(N->getOpcode(), dl, OutVT, Hi);
@@ -1638,6 +1834,19 @@ SDValue DAGTypeLegalizer::SplitVecOp_EXTRACT_VECTOR_ELT(SDNode *N) {
   if (CustomLowerNode(N, N->getValueType(0), true))
     return SDValue();
 
+  // TODO: 
+  // At the point of legalization, StackRegions are not yet initialized,
+  // which means there is no opportunity yet to register a slot to
+  // a stackregion. Since the object is not created by an alloca
+  // instruction, the InitializeStackRegions pass does not register
+  // the slot to any region, because it does not have its type, only a
+  // block of allocated stack space. This means we should either record
+  // the EVT in a stack object (which I think was explicitly designed to
+  // be type agnostic), or just keep the assert and let target lowering
+  // resolve the problem without using the stack.
+  assert(!Vec.getValueType().isScalableVector() &&
+         "This code does not yet implement VL scaled spills/fills");
+
   // Make the vector elements byte-addressable if they aren't already.
   SDLoc dl(N);
   EVT EltVT = VecVT.getVectorElementType();
@@ -1679,6 +1888,7 @@ SDValue DAGTypeLegalizer::SplitVecOp_MGATHER(MaskedGatherSDNode *MGT,
   SDValue Mask = MGT->getMask();
   SDValue Src0 = MGT->getValue();
   unsigned Alignment = MGT->getOriginalAlignment();
+  ISD::LoadExtType ExtType = MGT->getExtensionType();
 
   SDValue MaskLo, MaskHi;
   if (getTypeAction(Mask.getValueType()) == TargetLowering::TypeSplitVector)
@@ -1709,8 +1919,8 @@ SDValue DAGTypeLegalizer::SplitVecOp_MGATHER(MaskedGatherSDNode *MGT,
                          Alignment, MGT->getAAInfo(), MGT->getRanges());
 
   SDValue OpsLo[] = {Ch, Src0Lo, MaskLo, Ptr, IndexLo};
-  SDValue Lo = DAG.getMaskedGather(DAG.getVTList(LoVT, MVT::Other), LoVT, dl,
-                                   OpsLo, MMO);
+  SDValue Lo = DAG.getMaskedGather(DAG.getVTList(LoVT, MVT::Other), LoMemVT, dl,
+                                   OpsLo, MMO, ExtType);
 
   MMO = DAG.getMachineFunction().
     getMachineMemOperand(MGT->getPointerInfo(),
@@ -1719,8 +1929,8 @@ SDValue DAGTypeLegalizer::SplitVecOp_MGATHER(MaskedGatherSDNode *MGT,
                          MGT->getRanges());
 
   SDValue OpsHi[] = {Ch, Src0Hi, MaskHi, Ptr, IndexHi};
-  SDValue Hi = DAG.getMaskedGather(DAG.getVTList(HiVT, MVT::Other), HiVT, dl,
-                                   OpsHi, MMO);
+  SDValue Hi = DAG.getMaskedGather(DAG.getVTList(HiVT, MVT::Other), HiMemVT, dl,
+                                   OpsHi, MMO, ExtType);
 
   // Build a factor node to remember that this load is independent of the
   // other one.
@@ -1782,9 +1992,22 @@ SDValue DAGTypeLegalizer::SplitVecOp_MSTORE(MaskedStoreSDNode *N,
   Lo = DAG.getMaskedStore(Ch, DL, DataLo, Ptr, MaskLo, LoMemVT, MMO,
                           N->isTruncatingStore());
 
-  unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
-  Ptr = DAG.getNode(ISD::ADD, DL, Ptr.getValueType(), Ptr,
-                    DAG.getConstant(IncrementSize, DL, Ptr.getValueType()));
+  SDValue BytesIncrement;
+  if (LoMemVT.isScalableVector()) {
+    EVT T = Lo->getOperand(3)->getValueType(0);
+    SDValue NumberOfLanes = DAG.getNode(ISD::ELEMENT_COUNT, DL,
+                                        Ptr.getValueType(),
+                                        DAG.getValueType(T));
+    uint64_t StoreSize = T.getVectorElementType().getStoreSize();
+    SDValue BytesPerLane = DAG.getConstant(StoreSize, DL, Ptr.getValueType());
+    BytesIncrement = DAG.getNode(ISD::MUL, DL, Ptr.getValueType(),
+                                 NumberOfLanes, BytesPerLane);
+  } else {
+    unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
+    BytesIncrement = DAG.getConstant(IncrementSize, DL, Ptr.getValueType());
+  }
+
+  Ptr = DAG.getNode(ISD::ADD, DL, Ptr.getValueType(), Ptr, BytesIncrement);
 
   MMO = DAG.getMachineFunction().
     getMachineMemOperand(N->getPointerInfo(),
@@ -1828,6 +2051,12 @@ SDValue DAGTypeLegalizer::SplitVecOp_MSCATTER(MaskedScatterSDNode *N,
   else
     std::tie(MaskLo, MaskHi) = DAG.SplitVector(Mask, DL);
 
+  SDValue PtrLo, PtrHi;
+  if (Ptr.getValueType().isVector()) // gather form vector of pointers
+    std::tie(PtrLo, PtrHi) = DAG.SplitVector(Ptr, DL);
+  else
+    PtrLo = PtrHi = Ptr;
+
   SDValue IndexHi, IndexLo;
   if (getTypeAction(Index.getValueType()) == TargetLowering::TypeSplitVector)
     GetSplitVector(Index, IndexLo, IndexHi);
@@ -1841,8 +2070,8 @@ SDValue DAGTypeLegalizer::SplitVecOp_MSCATTER(MaskedScatterSDNode *N,
                          Alignment, N->getAAInfo(), N->getRanges());
 
   SDValue OpsLo[] = {Ch, DataLo, MaskLo, Ptr, IndexLo};
-  Lo = DAG.getMaskedScatter(DAG.getVTList(MVT::Other), DataLo.getValueType(),
-                            DL, OpsLo, MMO);
+  Lo = DAG.getMaskedScatter(DAG.getVTList(MVT::Other), LoMemVT, DL, OpsLo, MMO,
+                            N->isTruncatingStore());
 
   MMO = DAG.getMachineFunction().
     getMachineMemOperand(N->getPointerInfo(),
@@ -1850,8 +2079,8 @@ SDValue DAGTypeLegalizer::SplitVecOp_MSCATTER(MaskedScatterSDNode *N,
                          Alignment, N->getAAInfo(), N->getRanges());
 
   SDValue OpsHi[] = {Ch, DataHi, MaskHi, Ptr, IndexHi};
-  Hi = DAG.getMaskedScatter(DAG.getVTList(MVT::Other), DataHi.getValueType(),
-                            DL, OpsHi, MMO);
+  Hi = DAG.getMaskedScatter(DAG.getVTList(MVT::Other), HiMemVT, DL, OpsHi, MMO,
+                            N->isTruncatingStore());
 
   // Build a factor node to remember that this store is independent of the
   // other one.
@@ -1886,17 +2115,33 @@ SDValue DAGTypeLegalizer::SplitVecOp_STORE(StoreSDNode *N, unsigned OpNo) {
     Lo = DAG.getStore(Ch, DL, Lo, Ptr, N->getPointerInfo(),
                       isVol, isNT, Alignment, AAInfo);
 
+  SDValue BytesIncrement;
+  MachinePointerInfo MPI;
+  if (LoMemVT.isScalableVector()) {
+    EVT T = Lo->getOperand(1)->getValueType(0);
+    SDValue NumberOfLanes = DAG.getNode(ISD::ELEMENT_COUNT, DL,
+                                        Ptr.getValueType(),
+                                        DAG.getValueType(T));
+    EVT ElemVT = Lo->getOperand(1)->getValueType(0).getVectorElementType();
+    uint64_t StoreSize = ElemVT.getStoreSize();
+    SDValue BytesPerLane = DAG.getConstant(StoreSize, DL, Ptr.getValueType());
+    BytesIncrement = DAG.getNode(ISD::MUL, DL, Ptr.getValueType(),
+                                 NumberOfLanes, BytesPerLane);
+
+    MPI = N->getPointerInfo();
+  } else {
+    BytesIncrement = DAG.getConstant(IncrementSize, DL, Ptr.getValueType());
+    MPI = N->getPointerInfo().getWithOffset(IncrementSize);
+  }
+
   // Increment the pointer to the other half.
-  Ptr = DAG.getNode(ISD::ADD, DL, Ptr.getValueType(), Ptr,
-                    DAG.getConstant(IncrementSize, DL, Ptr.getValueType()));
+  Ptr = DAG.getNode(ISD::ADD, DL, Ptr.getValueType(), Ptr, BytesIncrement);
 
   if (isTruncating)
-    Hi = DAG.getTruncStore(Ch, DL, Hi, Ptr,
-                           N->getPointerInfo().getWithOffset(IncrementSize),
+    Hi = DAG.getTruncStore(Ch, DL, Hi, Ptr, MPI,
                            HiMemVT, isVol, isNT, Alignment, AAInfo);
   else
-    Hi = DAG.getStore(Ch, DL, Hi, Ptr,
-                      N->getPointerInfo().getWithOffset(IncrementSize),
+    Hi = DAG.getStore(Ch, DL, Hi, Ptr, MPI,
                       isVol, isNT, Alignment, AAInfo);
 
   return DAG.getNode(ISD::TokenFactor, DL, MVT::Other, Lo, Hi);
@@ -1924,6 +2169,20 @@ SDValue DAGTypeLegalizer::SplitVecOp_CONCAT_VECTORS(SDNode *N) {
   return DAG.getNode(ISD::BUILD_VECTOR, DL, N->getValueType(0), Elts);
 }
 
+SDValue DAGTypeLegalizer::SplitVecOp_ELEMENT_COUNT(SDNode *N) {
+  EVT OpVT = cast<VTSDNode>(N->getOperand(0))->getVT();
+  EVT SplitVT = TLI.getTypeToTransformTo(*DAG.getContext(), OpVT);
+
+  assert(OpVT.getVectorNumElements() == 2*SplitVT.getVectorNumElements());
+
+  SDLoc DL(N);
+  EVT VT = N->getValueType(0);
+  SDValue ElemCount = DAG.getNode(ISD::ELEMENT_COUNT, DL, VT,
+                                  DAG.getValueType(SplitVT));
+
+  return DAG.getNode(ISD::MUL, DL, VT, ElemCount, DAG.getConstant(2, DL, VT));
+}
+
 SDValue DAGTypeLegalizer::SplitVecOp_TruncateHelper(SDNode *N) {
   // The result type is legal, but the input type is illegal.  If splitting
   // ends up with the result type of each half still being legal, just
@@ -1945,12 +2204,12 @@ SDValue DAGTypeLegalizer::SplitVecOp_TruncateHelper(SDNode *N) {
   SDValue InVec = N->getOperand(0);
   EVT InVT = InVec->getValueType(0);
   EVT OutVT = N->getValueType(0);
-  unsigned NumElements = OutVT.getVectorNumElements();
+  auto EltCnt = OutVT.getVectorElementCount();
   bool IsFloat = OutVT.isFloatingPoint();
 
   // Widening should have already made sure this is a power-two vector
   // if we're trying to split it at all. assert() that's true, just in case.
-  assert(!(NumElements & 1) && "Splitting vector, but not in half!");
+  assert(!(EltCnt.Min & 1) && "Splitting vector, but not in half!");
 
   unsigned InElementSize = InVT.getVectorElementType().getSizeInBits();
   unsigned OutElementSize = OutVT.getVectorElementType().getSizeInBits();
@@ -1969,12 +2228,11 @@ SDValue DAGTypeLegalizer::SplitVecOp_TruncateHelper(SDNode *N) {
   EVT HalfElementVT = IsFloat ?
     EVT::getFloatingPointVT(InElementSize/2) :
     EVT::getIntegerVT(*DAG.getContext(), InElementSize/2);
-  EVT HalfVT = EVT::getVectorVT(*DAG.getContext(), HalfElementVT,
-                                NumElements/2);
+  EVT HalfVT = EVT::getVectorVT(*DAG.getContext(), HalfElementVT, EltCnt/2);
   SDValue HalfLo = DAG.getNode(N->getOpcode(), DL, HalfVT, InLoVec);
   SDValue HalfHi = DAG.getNode(N->getOpcode(), DL, HalfVT, InHiVec);
   // Concatenate them to get the full intermediate truncation result.
-  EVT InterVT = EVT::getVectorVT(*DAG.getContext(), HalfElementVT, NumElements);
+  EVT InterVT = EVT::getVectorVT(*DAG.getContext(), HalfElementVT, EltCnt);
   SDValue InterVec = DAG.getNode(ISD::CONCAT_VECTORS, DL, InterVT, HalfLo,
                                  HalfHi);
   // Now finish up by truncating all the way down to the original result
@@ -1997,9 +2255,11 @@ SDValue DAGTypeLegalizer::SplitVecOp_VSETCC(SDNode *N) {
   SDLoc DL(N);
   GetSplitVector(N->getOperand(0), Lo0, Hi0);
   GetSplitVector(N->getOperand(1), Lo1, Hi1);
-  unsigned PartElements = Lo0.getValueType().getVectorNumElements();
-  EVT PartResVT = EVT::getVectorVT(*DAG.getContext(), MVT::i1, PartElements);
-  EVT WideResVT = EVT::getVectorVT(*DAG.getContext(), MVT::i1, 2*PartElements);
+  auto PartEltCnt = Lo0.getValueType().getVectorElementCount();
+
+  LLVMContext &Context = *DAG.getContext();
+  EVT PartResVT = EVT::getVectorVT(Context, MVT::i1, PartEltCnt);
+  EVT WideResVT = EVT::getVectorVT(Context, MVT::i1, PartEltCnt*2);
 
   LoRes = DAG.getNode(ISD::SETCC, DL, PartResVT, Lo0, Lo1, N->getOperand(2));
   HiRes = DAG.getNode(ISD::SETCC, DL, PartResVT, Hi0, Hi1, N->getOperand(2));
@@ -2017,11 +2277,10 @@ SDValue DAGTypeLegalizer::SplitVecOp_FP_ROUND(SDNode *N) {
   EVT InVT = Lo.getValueType();
 
   EVT OutVT = EVT::getVectorVT(*DAG.getContext(), ResVT.getVectorElementType(),
-                               InVT.getVectorNumElements());
+                               InVT.getVectorElementCount());
 
   Lo = DAG.getNode(ISD::FP_ROUND, DL, OutVT, Lo, N->getOperand(1));
   Hi = DAG.getNode(ISD::FP_ROUND, DL, OutVT, Hi, N->getOperand(1));
-
   return DAG.getNode(ISD::CONCAT_VECTORS, DL, ResVT, Lo, Hi);
 }
 
@@ -2920,7 +3179,7 @@ SDValue DAGTypeLegalizer::WidenVecRes_MGATHER(MaskedGatherSDNode *N) {
   SDValue Ops[] = { N->getChain(), Src0, Mask, N->getBasePtr(), Index };
   SDValue Res = DAG.getMaskedGather(DAG.getVTList(WideVT, MVT::Other),
                                     N->getMemoryVT(), dl, Ops,
-                                    N->getMemOperand());
+                                    N->getMemOperand(), N->getExtensionType());
 
   // Legalize the chain result - switch anything that used the old chain to
   // use the new one.
@@ -3080,6 +3339,7 @@ bool DAGTypeLegalizer::WidenVectorOperand(SDNode *N, unsigned OpNo) {
 
   case ISD::BITCAST:            Res = WidenVecOp_BITCAST(N); break;
   case ISD::CONCAT_VECTORS:     Res = WidenVecOp_CONCAT_VECTORS(N); break;
+  case ISD::ELEMENT_COUNT:      Res = WidenVecOp_ELEMENT_COUNT(N); break;
   case ISD::EXTRACT_SUBVECTOR:  Res = WidenVecOp_EXTRACT_SUBVECTOR(N); break;
   case ISD::EXTRACT_VECTOR_ELT: Res = WidenVecOp_EXTRACT_VECTOR_ELT(N); break;
   case ISD::STORE:              Res = WidenVecOp_STORE(N); break;
@@ -3357,7 +3617,7 @@ SDValue DAGTypeLegalizer::WidenVecOp_MSCATTER(SDNode *N, unsigned OpNo) {
   SDValue Ops[] = {MSC->getChain(), WideVal, Mask, MSC->getBasePtr(), Index};
   return DAG.getMaskedScatter(DAG.getVTList(MVT::Other),
                               MSC->getMemoryVT(), dl, Ops,
-                              MSC->getMemOperand());
+                              MSC->getMemOperand(), MSC->isTruncatingStore());
 }
 
 SDValue DAGTypeLegalizer::WidenVecOp_SETCC(SDNode *N) {
@@ -3387,6 +3647,18 @@ SDValue DAGTypeLegalizer::WidenVecOp_SETCC(SDNode *N) {
   return PromoteTargetBoolean(CC, N->getValueType(0));
 }
 
+SDValue DAGTypeLegalizer::WidenVecOp_ELEMENT_COUNT(SDNode *N) {
+  EVT OpVT = cast<VTSDNode>(N->getOperand(0))->getVT();
+  EVT WideVT = TLI.getTypeToTransformTo(*DAG.getContext(), OpVT);
+  assert(WideVT.getVectorNumElements() == 2*OpVT.getVectorNumElements());
+
+  SDLoc DL(N);
+  EVT VT = N->getValueType(0);
+  SDValue ElemCount = DAG.getNode(ISD::ELEMENT_COUNT, DL, VT,
+                                  DAG.getValueType(WideVT));
+
+  return DAG.getNode(ISD::SRA, DL, VT, ElemCount, DAG.getConstant(1, DL, VT));
+}
 
 //===----------------------------------------------------------------------===//
 // Vector Widening Utilities
@@ -3744,7 +4016,9 @@ void DAGTypeLegalizer::GenWidenVectorStores(SmallVectorImpl<SDValue> &StChain,
     } else {
       // Cast the vector to the scalar type we can store.
       unsigned NumElts = ValWidth / NewVTWidth;
-      EVT NewVecVT = EVT::getVectorVT(*DAG.getContext(), NewVT, NumElts);
+      bool  IsScalable = ValVT.isScalableVector();
+      EVT NewVecVT = EVT::getVectorVT(*DAG.getContext(), NewVT, NumElts,
+                                      IsScalable);
       SDValue VecOp = DAG.getNode(ISD::BITCAST, dl, NewVecVT, ValOp);
       // Readjust index position based on new vector type.
       Idx = Idx * ValEltWidth / NewVTWidth;

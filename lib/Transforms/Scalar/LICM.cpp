@@ -457,7 +457,7 @@ bool canSinkOrHoistInst(Instruction &I, AliasAnalysis *AA, DominatorTree *DT,
       // writes to this memory in the loop, we can hoist or sink.
       if (AliasAnalysis::onlyAccessesArgPointees(Behavior)) {
         for (Value *Op : CI->arg_operands())
-          if (Op->getType()->isPointerTy() &&
+          if (Op->getType()->isPtrOrPtrVectorTy() &&
               pointerInvalidatedByLoop(Op, MemoryLocation::UnknownSize,
                                        AAMDNodes(), CurAST))
             return false;
@@ -734,7 +734,37 @@ static bool isSafeToExecuteUnconditionally(const Instruction &Inst,
   if (isSafeToSpeculativelyExecute(&Inst, CtxI, DT, TLI))
     return true;
 
-  return isGuaranteedToExecute(Inst, DT, CurLoop, SafetyInfo);
+  if (isGuaranteedToExecute(Inst, DT, CurLoop, SafetyInfo))
+    return true;
+
+  auto *LI = dyn_cast<LoadInst>(&Inst);
+  // Special case: if the instruction is not allowed to speculatively
+  // execute and it is not guaranteed to execute, but instead it is a
+  // load instruction that is loading from an address, which is also
+  // loaded from in its dominating block, then we know we can safely
+  // load from that address without causing a trap.
+  if (LI && !LI->isVolatile()) {
+    auto *Addr = dyn_cast<Instruction>(LI->getPointerOperand());
+    auto *BB = const_cast<BasicBlock*>(Inst.getParent());
+    DomTreeNode *DTNode = DT->getNode(BB);
+
+    // Walk up the dominator tree until we found a load from that address.
+    while (Addr && (DTNode = DTNode->getIDom())) {
+      auto *DomBB = DTNode->getBlock();
+      // Stop if address (DEF) does not dominate DTNode (possible USE)
+      if (!DT->dominates(Addr->getParent(), BB))
+        break;
+
+      BasicBlock::iterator BI, BE;
+      for (BI = DomBB->begin(), BE = DomBB->end(); BI != BE; ++BI) {
+        auto *DomLI = dyn_cast<LoadInst>(&*BI);
+        if (DomLI && DomLI->getPointerOperand() == Addr)
+          return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 static bool isGuaranteedToExecute(const Instruction &Inst,

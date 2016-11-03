@@ -499,8 +499,12 @@ static std::string getMangledTypeStr(Type* Ty) {
     Result += "a" + llvm::utostr(ATyp->getNumElements()) +
       getMangledTypeStr(ATyp->getElementType());
   } else if (StructType* STyp = dyn_cast<StructType>(Ty)) {
-    assert(!STyp->isLiteral() && "TODO: implement literal types");
-    Result += STyp->getName();
+    // TODO: we will need a better fix than this
+    //assert(!STyp->isLiteral() && "TODO: implement literal types");
+    if (STyp->isLiteral())
+      Result += "lit_struct";
+    else
+      Result += STyp->getName();
   } else if (FunctionType* FT = dyn_cast<FunctionType>(Ty)) {
     Result += "f_" + getMangledTypeStr(FT->getReturnType());
     for (size_t i = 0; i < FT->getNumParams(); i++)
@@ -508,11 +512,16 @@ static std::string getMangledTypeStr(Type* Ty) {
     if (FT->isVarArg())
       Result += "vararg";
     // Ensure nested function types are distinguishable.
-    Result += "f"; 
-  } else if (isa<VectorType>(Ty))
-    Result += "v" + utostr(Ty->getVectorNumElements()) +
-      getMangledTypeStr(Ty->getVectorElementType());
-  else if (Ty)
+    Result += "f";
+  } else if (VectorType* VTyp = dyn_cast<VectorType>(Ty)) {
+    if (VTyp->getElementType()->isPointerTy()) {
+      if (VTyp->isScalable())
+        Result += "nx";
+      Result += "v" + utostr(VTyp->getNumElements());
+      Result += getMangledTypeStr(VTyp->getElementType());
+    } else
+      Result += EVT::getEVT(Ty).getEVTString();
+  } else if (Ty)
     Result += EVT::getEVT(Ty).getEVTString();
   return Result;
 }
@@ -573,7 +582,12 @@ enum IIT_Info {
   IIT_VEC_OF_PTRS_TO_ELT = 33,
   IIT_I128 = 34,
   IIT_V512 = 35,
-  IIT_V1024 = 36
+  IIT_V1024 = 36,
+  IIT_SCALABLE_VEC = 37,
+  IIT_VEC_ELEMENT = 38,
+  IIT_VEC_OF_BITCASTS_TO_INT = 39,
+  IIT_DOUBLE_VEC_ARG = 40,
+  IIT_UNPACK_ARG = 41
 };
 
 
@@ -689,9 +703,21 @@ static void DecodeIITType(unsigned &NextElt, ArrayRef<unsigned char> Infos,
                                              ArgInfo));
     return;
   }
+  case IIT_UNPACK_ARG: {
+    unsigned ArgInfo = (NextElt == Infos.size() ? 0 : Infos[NextElt++]);
+    OutputTable.push_back(IITDescriptor::get(IITDescriptor::UnpackArgument,
+                                             ArgInfo));
+    return;
+  }
   case IIT_HALF_VEC_ARG: {
     unsigned ArgInfo = (NextElt == Infos.size() ? 0 : Infos[NextElt++]);
     OutputTable.push_back(IITDescriptor::get(IITDescriptor::HalfVecArgument,
+                                             ArgInfo));
+    return;
+  }
+  case IIT_DOUBLE_VEC_ARG: {
+    unsigned ArgInfo = (NextElt == Infos.size() ? 0 : Infos[NextElt++]);
+    OutputTable.push_back(IITDescriptor::get(IITDescriptor::DoubleVecArgument,
                                              ArgInfo));
     return;
   }
@@ -704,6 +730,12 @@ static void DecodeIITType(unsigned &NextElt, ArrayRef<unsigned char> Infos,
   case IIT_PTR_TO_ARG: {
     unsigned ArgInfo = (NextElt == Infos.size() ? 0 : Infos[NextElt++]);
     OutputTable.push_back(IITDescriptor::get(IITDescriptor::PtrToArgument,
+                                             ArgInfo));
+    return;
+  }
+  case IIT_VEC_OF_BITCASTS_TO_INT: {
+    unsigned ArgInfo = (NextElt == Infos.size() ? 0 : Infos[NextElt++]);
+    OutputTable.push_back(IITDescriptor::get(IITDescriptor::VecOfBitcastsToInt,
                                              ArgInfo));
     return;
   }
@@ -724,6 +756,18 @@ static void DecodeIITType(unsigned &NextElt, ArrayRef<unsigned char> Infos,
 
     for (unsigned i = 0; i != StructElts; ++i)
       DecodeIITType(NextElt, Infos, OutputTable);
+    return;
+  }
+  case IIT_SCALABLE_VEC: {
+    OutputTable.push_back(IITDescriptor::get(IITDescriptor::ScalableVecArgument,
+                                             0));
+    DecodeIITType(NextElt, Infos, OutputTable);
+    return;
+  }
+  case IIT_VEC_ELEMENT: {
+    unsigned ArgInfo = (NextElt == Infos.size() ? 0 : Infos[NextElt++]);
+    OutputTable.push_back(IITDescriptor::get(IITDescriptor::VecElementArgument,
+                                             ArgInfo));
     return;
   }
   }
@@ -818,14 +862,25 @@ static Type *DecodeFixedType(ArrayRef<Intrinsic::IITDescriptor> &Infos,
     assert(ITy->getBitWidth() % 2 == 0);
     return IntegerType::get(Context, ITy->getBitWidth() / 2);
   }
+  case IITDescriptor::UnpackArgument: {
+    Type *Ty = Tys[D.getArgumentNumber()];
+    if (VectorType *VTy = dyn_cast<VectorType>(Ty))
+      return VectorType::getDoubleElementsVectorType(
+               VectorType::getTruncatedElementVectorType(VTy));
+
+    llvm_unreachable("unhandled");
+  }
   case IITDescriptor::HalfVecArgument:
     return VectorType::getHalfElementsVectorType(cast<VectorType>(
                                                   Tys[D.getArgumentNumber()]));
+  case IITDescriptor::DoubleVecArgument:
+    return VectorType::getDoubleElementsVectorType(cast<VectorType>(
+                                                   Tys[D.getArgumentNumber()]));
   case IITDescriptor::SameVecWidthArgument: {
     Type *EltTy = DecodeFixedType(Infos, Tys, Context);
     Type *Ty = Tys[D.getArgumentNumber()];
     if (VectorType *VTy = dyn_cast<VectorType>(Ty)) {
-      return VectorType::get(EltTy, VTy->getNumElements());
+      return VectorType::get(EltTy, VTy->getElementCount());
     }
     llvm_unreachable("unhandled");
   }
@@ -833,14 +888,31 @@ static Type *DecodeFixedType(ArrayRef<Intrinsic::IITDescriptor> &Infos,
     Type *Ty = Tys[D.getArgumentNumber()];
     return PointerType::getUnqual(Ty);
   }
+  case IITDescriptor::VecOfBitcastsToInt: {
+    Type *Ty = Tys[D.getArgumentNumber()];
+    if (VectorType *VTy = dyn_cast<VectorType>(Ty))
+      return VectorType::getInteger(VTy);
+    llvm_unreachable("Expected an argument of Vector Type");
+  }
   case IITDescriptor::VecOfPtrsToElt: {
     Type *Ty = Tys[D.getArgumentNumber()];
     VectorType *VTy = dyn_cast<VectorType>(Ty);
     if (!VTy)
       llvm_unreachable("Expected an argument of Vector Type");
-    Type *EltTy = VTy->getVectorElementType();
+    Type *EltTy = VTy->getElementType();
     return VectorType::get(PointerType::getUnqual(EltTy),
-                           VTy->getNumElements());
+                           VTy->getElementCount());
+  }
+  case IITDescriptor::ScalableVecArgument: {
+    Type *Ty = DecodeFixedType(Infos, Tys, Context);
+    return VectorType::get(Ty->getVectorElementType(),
+                           { Ty->getVectorNumElements(), true });
+  }
+  case IITDescriptor::VecElementArgument: {
+    Type *Ty = Tys[D.getArgumentNumber()];
+    if (VectorType *VTy = dyn_cast<VectorType>(Ty))
+      return VTy->getElementType();
+    llvm_unreachable("Expected an argument of Vector Type");
   }
  }
   llvm_unreachable("unhandled");

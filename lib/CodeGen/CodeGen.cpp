@@ -35,6 +35,7 @@ void llvm::initializeCodeGen(PassRegistry &Registry) {
   initializeGCModuleInfoPass(Registry);
   initializeIfConverterPass(Registry);
   initializeInterleavedAccessPass(Registry);
+  initializeInitStackRegionPassPass(Registry);
   initializeLiveDebugVariablesPass(Registry);
   initializeLiveIntervalsPass(Registry);
   initializeLiveStacksPass(Registry);

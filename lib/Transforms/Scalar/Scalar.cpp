@@ -55,6 +55,7 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializeLoopInstSimplifyPass(Registry);
   initializeLoopInterchangePass(Registry);
   initializeLoopRotateLegacyPassPass(Registry);
+  initializeLoopSpeculativeBoundsCheckPass(Registry);
   initializeLoopStrengthReducePass(Registry);
   initializeLoopRerollPass(Registry);
   initializeLoopUnrollPass(Registry);
@@ -88,6 +89,7 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializePlaceSafepointsPass(Registry);
   initializeFloat2IntPass(Registry);
   initializeLoopDistributePass(Registry);
+  initializeSeparateInvariantsFromGepOffsetPass(Registry);
   initializeLoopLoadEliminationPass(Registry);
   initializeLoopSimplifyCFGLegacyPassPass(Registry);
   initializeLoopVersioningPassPass(Registry);

@@ -188,6 +188,14 @@ public:
 
   unsigned fixOneOperandFPComparison(const MCInst &MI, unsigned EncodedValue,
                                      const MCSubtargetInfo &STI) const;
+
+  uint32_t getSVEIncDecImm(const MCInst &MI, unsigned OpIdx,
+                           SmallVectorImpl<MCFixup> &Fixups,
+                           const MCSubtargetInfo &STI) const;
+
+  unsigned getSImm8OptLsl(const MCInst &MI, unsigned OpIdx,
+                        SmallVectorImpl<MCFixup> &Fixups,
+                        const MCSubtargetInfo &STI) const;
 };
 
 } // end anonymous namespace
@@ -268,10 +276,10 @@ AArch64MCCodeEmitter::getAddSubImmOpValue(const MCInst &MI, unsigned OpIdx,
   assert(AArch64_AM::getShiftType(MO1.getImm()) == AArch64_AM::LSL &&
          "unexpected shift type for add/sub immediate");
   unsigned ShiftVal = AArch64_AM::getShiftValue(MO1.getImm());
-  assert((ShiftVal == 0 || ShiftVal == 12) &&
+  assert((ShiftVal == 0 || ShiftVal == 12 || ShiftVal == 8) &&
          "unexpected shift value for add/sub immediate");
   if (MO.isImm())
-    return MO.getImm() | (ShiftVal == 0 ? 0 : (1 << 12));
+    return MO.getImm() | (ShiftVal == 0 ? 0 : (1 << ShiftVal));
   assert(MO.isExpr() && "Unable to encode MCOperand!");
   const MCExpr *Expr = MO.getExpr();
 
@@ -281,7 +289,15 @@ AArch64MCCodeEmitter::getAddSubImmOpValue(const MCInst &MI, unsigned OpIdx,
 
   ++MCNumFixups;
 
-  return 0;
+  // Set the shift bit of the add instruction for relocation types
+  // R_AARCH64_TLSLE_ADD_TPREL_HI12 and R_AARCH64_TLSLD_ADD_DTPREL_HI12.
+  if (const AArch64MCExpr *A64E = dyn_cast<AArch64MCExpr>(Expr)) {
+    AArch64MCExpr::VariantKind RefKind = A64E->getKind();
+    if (RefKind == AArch64MCExpr::VK_TPREL_HI12 ||
+        RefKind == AArch64MCExpr::VK_DTPREL_HI12)
+      ShiftVal = 12;
+  }
+  return ShiftVal == 0 ? 0 : (1 << ShiftVal);
 }
 
 /// getCondBranchTargetOpValue - Return the encoded value for a conditional
@@ -632,6 +648,32 @@ unsigned AArch64MCCodeEmitter::fixOneOperandFPComparison(
   // as 0, but is ignored by the processor.
   EncodedValue &= ~(0x1f << 16);
   return EncodedValue;
+}
+
+uint32_t
+AArch64MCCodeEmitter::getSVEIncDecImm(const MCInst &MI, unsigned OpIdx,
+                                      SmallVectorImpl<MCFixup> &Fixups,
+                                      const MCSubtargetInfo &STI) const {
+  const MCOperand &MO = MI.getOperand(OpIdx);
+  assert(MO.isImm() && "Expected an immediate value for the scale amount!");
+  return MO.getImm() - 1;
+}
+
+unsigned
+AArch64MCCodeEmitter::getSImm8OptLsl(const MCInst &MI, unsigned OpIdx,
+                                     SmallVectorImpl<MCFixup> &Fixups,
+                                     const MCSubtargetInfo &STI) const {
+  // Suboperands are [imm, shifter].
+  const MCOperand &MO = MI.getOperand(OpIdx);
+  const MCOperand &MO1 = MI.getOperand(OpIdx + 1);
+  assert(AArch64_AM::getShiftType(MO1.getImm()) == AArch64_AM::LSL &&
+         "Unexpected shift type for cpy/dup immediate.");
+  unsigned ShiftVal = AArch64_AM::getShiftValue(MO1.getImm());
+  assert((ShiftVal == 0 || ShiftVal == 8) &&
+         "Unexpected shift value for cpy/dup immediate.");
+
+  assert(MO.isImm() && "Unexpected second operand type!");
+  return (MO.getImm() & 0xff) | (ShiftVal == 0 ? 0 : (1 << ShiftVal));
 }
 
 #include "AArch64GenMCCodeEmitter.inc"

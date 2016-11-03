@@ -627,23 +627,26 @@ bool ArrayType::isValidElementType(Type *ElemTy) {
 //                          VectorType Implementation
 //===----------------------------------------------------------------------===//
 
-VectorType::VectorType(Type *ElType, unsigned NumEl)
-  : SequentialType(VectorTyID, ElType) {
-  NumElements = NumEl;
+VectorType::VectorType(Type *ElType, unsigned NumEls, bool Scalable)
+  : SequentialType(VectorTyID, ElType),
+    EC( { NumEls, Scalable }) {
 }
 
-VectorType *VectorType::get(Type *ElementType, unsigned NumElements) {
-  assert(NumElements > 0 && "#Elements of a VectorType must be greater than 0");
-  assert(isValidElementType(ElementType) && "Element type of a VectorType must "
-                                            "be an integer, floating point, or "
-                                            "pointer type.");
+VectorType *VectorType::get(Type *ElType, VectorType::ElementCount EC) {
+  Type *ElementType = const_cast<Type*>(ElType);
+  assert(EC.Min > 0 &&
+         "#Elements of a VectorType must be greater than 0");
+  assert(isValidElementType(ElementType) &&
+         "Element type of a VectorType must be an integer, floating point, or "
+         "pointer type.");
 
   LLVMContextImpl *pImpl = ElementType->getContext().pImpl;
   VectorType *&Entry = ElementType->getContext().pImpl
-    ->VectorTypes[std::make_pair(ElementType, NumElements)];
+    ->VectorTypes[std::make_tuple(ElementType, EC.Min, EC.Scalable)];
 
   if (!Entry)
-    Entry = new (pImpl->TypeAllocator) VectorType(ElementType, NumElements);
+    Entry = new (pImpl->TypeAllocator) VectorType(ElementType, EC.Min,
+                                                  EC.Scalable);
   return Entry;
 }
 

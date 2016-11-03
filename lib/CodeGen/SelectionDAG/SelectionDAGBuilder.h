@@ -833,6 +833,7 @@ private:
   void visitAShr(const User &I) { visitShift(I, ISD::SRA); }
   void visitICmp(const User &I);
   void visitFCmp(const User &I);
+  void visitTest(const User &I);
   // Visit the conversion instructions
   void visitTrunc(const User &I);
   void visitZExt(const User &I);
@@ -851,6 +852,8 @@ private:
   void visitExtractElement(const User &I);
   void visitInsertElement(const User &I);
   void visitShuffleVector(const User &I);
+  void visitElementCount(const User &I);
+  void visitSeriesVector(const User &I);
 
   void visitExtractValue(const ExtractValueInst &I);
   void visitInsertValue(const InsertValueInst &I);
@@ -899,6 +902,8 @@ private:
   // These two are implemented in StatepointLowering.cpp
   void visitGCRelocate(const GCRelocateInst &I);
   void visitGCResult(const GCResultInst &I);
+
+  void visitPropFF(const User &I);
 
   void visitUserOp1(const Instruction &I) {
     llvm_unreachable("UserOp1 should not exist at instruction selection time!");

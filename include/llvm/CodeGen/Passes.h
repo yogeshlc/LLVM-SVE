@@ -49,6 +49,11 @@ namespace llvm {
   createMachineFunctionPrinterPass(raw_ostream &OS,
                                    const std::string &Banner ="");
 
+  /// createMachineFunctionBlamePass - Get a pass that tags all untagged
+  /// instructions with the name of the pass that created them.
+  MachineFunctionPass *
+  createMachineFunctionBlamePass(const std::string &PassName);
+
   /// MIRPrinting pass - this pass prints out the LLVM IR into the given stream
   /// using the MIR serialization format.
   MachineFunctionPass *createPrintMIRPass(raw_ostream &OS);
@@ -288,6 +293,10 @@ namespace llvm {
   ///
   FunctionPass *createSjLjEHPreparePass();
 
+  /// InitStackRegion - This pass initializes stack regions by assigning
+  /// Regions to applicable locals and by gathering Callee Saved Registers.
+  extern char &InitStackRegionID;
+
   /// LocalStackSlotAllocation - This pass assigns local frame indices to stack
   /// slots relative to one another and allocates base registers to access them
   /// when it is estimated by the target to be out of range of normal frame
@@ -334,6 +343,11 @@ namespace llvm {
   /// memory accesses to target specific intrinsics.
   ///
   FunctionPass *createInterleavedAccessPass(const TargetMachine *TM);
+
+  /// InterleavedGatherScatter Pass - This pass identifies and matches
+  /// interleaved gathers and scatters to target specific intrinsics.
+  ///
+  FunctionPass *createInterleavedGatherScatterPass(const TargetMachine *TM);
 
   /// LowerEmuTLS - This pass generates __emutls_[vt].xyz variables for all
   /// TLS variables for the emulated TLS model.

@@ -536,7 +536,12 @@ void TypePrinting::print(Type *Ty, raw_ostream &OS) {
   }
   case Type::VectorTyID: {
     VectorType *PTy = cast<VectorType>(Ty);
-    OS << "<" << PTy->getNumElements() << " x ";
+    OS << '<';
+
+    if (PTy->isScalable())
+      OS << "n x ";
+
+    OS << PTy->getNumElements() << " x ";
     print(PTy->getElementType(), OS);
     OS << '>';
     return;
@@ -1041,8 +1046,8 @@ static void WriteAsOperandInternal(raw_ostream &Out, const Metadata *MD,
                                    SlotTracker *Machine, const Module *Context,
                                    bool FromValue = false);
 
-static const char *getPredicateText(unsigned predicate) {
-  const char * pred = "unknown";
+static const char *getComparePredicateText(unsigned predicate) {
+  const char *pred = "unknown";
   switch (predicate) {
   case FCmpInst::FCMP_FALSE: pred = "false"; break;
   case FCmpInst::FCMP_OEQ:   pred = "oeq"; break;
@@ -1070,6 +1075,21 @@ static const char *getPredicateText(unsigned predicate) {
   case ICmpInst::ICMP_UGE:   pred = "uge"; break;
   case ICmpInst::ICMP_ULT:   pred = "ult"; break;
   case ICmpInst::ICMP_ULE:   pred = "ule"; break;
+  }
+  return pred;
+}
+
+static const char *getTestPredicateText(unsigned predicate) {
+  const char *pred = "unknown";
+  switch (predicate) {
+  case TestInst::ALL_FALSE:   pred = "all false"; break;
+  case TestInst::ALL_TRUE:    pred = "all true"; break;
+  case TestInst::ANY_FALSE:   pred = "any false"; break;
+  case TestInst::ANY_TRUE:    pred = "any true"; break;
+  case TestInst::FIRST_FALSE: pred = "first false"; break;
+  case TestInst::FIRST_TRUE:  pred = "first true"; break;
+  case TestInst::LAST_FALSE:  pred = "last false"; break;
+  case TestInst::LAST_TRUE:   pred = "last true"; break;
   }
   return pred;
 }
@@ -1349,7 +1369,7 @@ static void WriteConstantInternal(raw_ostream &Out, const Constant *CV,
     Out << CE->getOpcodeName();
     WriteOptimizationInfo(Out, CE);
     if (CE->isCompare())
-      Out << ' ' << getPredicateText(CE->getPredicate());
+      Out << ' ' << getComparePredicateText(CE->getPredicate());
     Out << " (";
 
     if (const GEPOperator *GEP = dyn_cast<GEPOperator>(CE)) {
@@ -2848,9 +2868,11 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
   // Print out optimization information.
   WriteOptimizationInfo(Out, &I);
 
-  // Print out the compare instruction predicates
-  if (const CmpInst *CI = dyn_cast<CmpInst>(&I))
-    Out << ' ' << getPredicateText(CI->getPredicate());
+  // Print out the compare/test instruction predicates.
+  if (const auto *CI = dyn_cast<CmpInst>(&I))
+    Out << ' ' << getComparePredicateText(CI->getPredicate());
+  if (const auto *TI = dyn_cast<TestInst>(&I))
+    Out << ' ' << getTestPredicateText(TI->getPredicate());
 
   // Print out the atomicrmw operation
   if (const AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(&I))
@@ -3098,6 +3120,18 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
       writeOperand(Operand, true);   // Work with broken code
     }
     Out << ", ";
+    TypePrinter.print(I.getType(), Out);
+  } else if (isa<ElementCountInst>(I)) {
+    Out << " ";
+    writeOperand(Operand, true);
+    Out << " as ";
+    TypePrinter.print(I.getType(), Out);
+  } else if (isa<SeriesVectorInst>(I)) {
+    Out << " ";
+    writeOperand(I.getOperand(0), true);
+    Out << ", ";
+    writeOperand(I.getOperand(1), false);
+    Out << " as ";
     TypePrinter.print(I.getType(), Out);
   } else if (Operand) {   // Print the normal way.
     if (const auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {

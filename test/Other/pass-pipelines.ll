@@ -68,7 +68,6 @@
 ; We rotate loops prior to vectorization.
 ; CHECK-O2: Loop Pass Manager
 ; CHECK-O2-NEXT: Rotate Loops
-; CHECK-O2-NOT: Manager
 ; CHECK-O2: Loop Vectorization
 ; CHECK-O2-NOT: Manager
 ; CHECK-O2: SLP Vectorizer

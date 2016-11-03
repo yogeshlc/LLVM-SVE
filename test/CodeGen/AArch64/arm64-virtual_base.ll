@@ -1,4 +1,6 @@
-; RUN: llc < %s -O3 -mtriple=arm64-apple-ios -disable-post-ra | FileCheck %s
+; RUN: llc < %s -O3 -march arm64 -sve-lower-gather-scatter-to-interleaved=false | FileCheck %s
+; sve-lower-gather-scatter-to-interleaved implicitly enables a late inst-combine
+; pass, which inconveniently folds away part of this test, so is disabled
 ; <rdar://13463602>
 
 %struct.Counter_Struct = type { i64, i64 }

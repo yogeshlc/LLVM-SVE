@@ -1771,7 +1771,7 @@ ShuffleVectorInst::ShuffleVectorInst(Value *V1, Value *V2, Value *Mask,
                                      const Twine &Name,
                                      Instruction *InsertBefore)
 : Instruction(VectorType::get(cast<VectorType>(V1->getType())->getElementType(),
-                cast<VectorType>(Mask->getType())->getNumElements()),
+                cast<VectorType>(Mask->getType())->getElementCount()),
               ShuffleVector,
               OperandTraits<ShuffleVectorInst>::op_begin(this),
               OperandTraits<ShuffleVectorInst>::operands(this),
@@ -1788,7 +1788,7 @@ ShuffleVectorInst::ShuffleVectorInst(Value *V1, Value *V2, Value *Mask,
                                      const Twine &Name,
                                      BasicBlock *InsertAtEnd)
 : Instruction(VectorType::get(cast<VectorType>(V1->getType())->getElementType(),
-                cast<VectorType>(Mask->getType())->getNumElements()),
+                cast<VectorType>(Mask->getType())->getElementCount()),
               ShuffleVector,
               OperandTraits<ShuffleVectorInst>::op_begin(this),
               OperandTraits<ShuffleVectorInst>::operands(this),
@@ -1808,77 +1808,153 @@ bool ShuffleVectorInst::isValidOperands(const Value *V1, const Value *V2,
   if (!V1->getType()->isVectorTy() || V1->getType() != V2->getType())
     return false;
   
-  // Mask must be vector of i32.
+  // Mask must be a vector of integers.  Historically the mask had to be
+  // a constant vector of i32s, but for variable vectors it often makes
+  // more sense for the mask to have the same element width as the other
+  // inputs and the output.
   VectorType *MaskTy = dyn_cast<VectorType>(Mask->getType());
-  if (!MaskTy || !MaskTy->getElementType()->isIntegerTy(32))
+  if (!MaskTy || !MaskTy->getElementType()->isIntegerTy())
     return false;
 
-  // Check to see if Mask is valid.
-  if (isa<UndefValue>(Mask) || isa<ConstantAggregateZero>(Mask))
-    return true;
-
-  if (const ConstantVector *MV = dyn_cast<ConstantVector>(Mask)) {
-    unsigned V1Size = cast<VectorType>(V1->getType())->getNumElements();
-    for (Value *Op : MV->operands()) {
-      if (ConstantInt *CI = dyn_cast<ConstantInt>(Op)) {
-        if (CI->uge(V1Size*2))
-          return false;
-      } else if (!isa<UndefValue>(Op)) {
-        return false;
-      }
-    }
-    return true;
-  }
-  
-  if (const ConstantDataSequential *CDS =
-        dyn_cast<ConstantDataSequential>(Mask)) {
-    unsigned V1Size = cast<VectorType>(V1->getType())->getNumElements();
-    for (unsigned i = 0, e = MaskTy->getNumElements(); i != e; ++i)
-      if (CDS->getElementAsInteger(i) >= V1Size*2)
-        return false;
-    return true;
-  }
-  
-  // The bitcode reader can create a place holder for a forward reference
-  // used as the shuffle mask. When this occurs, the shuffle mask will
-  // fall into this case and fail. To avoid this error, do this bit of
-  // ugliness to allow such a mask pass.
-  if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(Mask))
-    if (CE->getOpcode() == Instruction::UserOp1)
-      return true;
-
-  return false;
+  return true;
 }
 
-/// getMaskValue - Return the index from the shuffle mask for the specified
-/// output result.  This is either -1 if the element is undef or a number less
-/// than 2*numelements.
-int ShuffleVectorInst::getMaskValue(Constant *Mask, unsigned i) {
+/// getMaskValue - Try to extract the index from the shuffle mask for the
+/// specified output result, returning true on success.  This is either
+/// -1 if the element is undef or a number less than 2*numelements.
+bool ShuffleVectorInst::getMaskValue(Value *Mask, unsigned i, int &Result) {
   assert(i < Mask->getType()->getVectorNumElements() && "Index out of range");
-  if (ConstantDataSequential *CDS =dyn_cast<ConstantDataSequential>(Mask))
-    return CDS->getElementAsInteger(i);
-  Constant *C = Mask->getAggregateElement(i);
-  if (isa<UndefValue>(C))
-    return -1;
-  return cast<ConstantInt>(C)->getZExtValue();
+  if (auto *CDS = dyn_cast<ConstantDataSequential>(Mask)) {
+    Result = CDS->getElementAsInteger(i);
+    return true;
+  }
+  if (auto *C = dyn_cast<Constant>(Mask)) {
+    C = C->getAggregateElement(i);
+    if (C) {
+      if (isa<UndefValue>(C)) {
+        Result = -1;
+        return true;
+      }
+      if (auto *CI = dyn_cast<ConstantInt>(C)) {
+        Result = CI->getZExtValue();
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /// getShuffleMask - Return the full mask for this instruction, where each
 /// element is the element number and undef's are returned as -1.
-void ShuffleVectorInst::getShuffleMask(Constant *Mask,
+bool ShuffleVectorInst::getShuffleMask(Value *Mask,
                                        SmallVectorImpl<int> &Result) {
-  unsigned NumElts = Mask->getType()->getVectorNumElements();
-  
-  if (ConstantDataSequential *CDS=dyn_cast<ConstantDataSequential>(Mask)) {
-    for (unsigned i = 0; i != NumElts; ++i)
-      Result.push_back(CDS->getElementAsInteger(i));
-    return;
-  }    
-  for (unsigned i = 0; i != NumElts; ++i) {
-    Constant *C = Mask->getAggregateElement(i);
-    Result.push_back(isa<UndefValue>(C) ? -1 :
-                     cast<ConstantInt>(C)->getZExtValue());
+  VectorType *VecTy = cast<VectorType>(Mask->getType());
+  if (VecTy->isScalable())
+    return false;
+  unsigned NumElts = VecTy->getVectorNumElements();
+  Result.resize(NumElts);
+  for (unsigned i = 0; i != NumElts; ++i)
+    if (!getMaskValue(Mask, i, Result[i]))
+      return false;
+  return true;
+}
+
+int ShuffleVectorInst::findBroadcastElement(Value *Mask) {
+  int SplatElem = -1;
+  SmallVector<int, 16> MaskElems;
+  if (getShuffleMask(Mask, MaskElems)) {
+    for (unsigned i = 0; i < MaskElems.size(); ++i) {
+      if (SplatElem != -1 && MaskElems[i] != -1 && MaskElems[i] != SplatElem)
+        return -1;
+      if (SplatElem == -1)
+        SplatElem = MaskElems[i];
+    }
   }
+  return SplatElem;
+}
+
+//===----------------------------------------------------------------------===//
+//                      ElementCountInst Implementation
+//===----------------------------------------------------------------------===//
+
+ElementCountInst::ElementCountInst(Type *Ty, Value *V,
+                                   Instruction *InsertBefore)
+: UnaryInstruction(Ty, ElementCount, V, InsertBefore) {
+  assert(Ty->isIntegerTy() && "return type must be an integer");
+}
+
+ElementCountInst::ElementCountInst(Type *Ty, Value *V,
+                                   BasicBlock *InsertAtEnd)
+: UnaryInstruction(Ty, ElementCount, V, InsertAtEnd) {
+  assert(Ty->isIntegerTy() && "return type must be an integer");
+}
+
+//===----------------------------------------------------------------------===//
+//                      SeriesVectorInst Implementation
+//===----------------------------------------------------------------------===//
+
+SeriesVectorInst::SeriesVectorInst(Type *Ty,
+                                   Value *Start,
+                                   Value *Step,
+                                   Instruction *InsertBefore)
+: Instruction(Ty, SeriesVector, OperandTraits<SeriesVectorInst>::op_begin(this),
+              2, InsertBefore) {
+  assert(Ty->getVectorElementType() == Start->getType() &&
+         "Invalid return type!");
+  assert(isValidOperands(Start, Step) && "Invalid operands for seriesvector!");
+  Op<0>() = Start;
+  Op<1>() = Step;
+}
+
+SeriesVectorInst::SeriesVectorInst(Type *Ty,
+                                   Value *Start,
+                                   Value *Step,
+                                   BasicBlock *InsertAtEnd)
+: Instruction(Ty, SeriesVector, OperandTraits<SeriesVectorInst>::op_begin(this),
+              2, InsertAtEnd) {
+  assert(Ty->getVectorElementType() == Start->getType() &&
+         "Invalid return type!");
+  assert(isValidOperands(Start, Step) && "Invalid operands for seriesvector!");
+  Op<0>() = Start;
+  Op<1>() = Step;
+}
+
+bool SeriesVectorInst::isValidOperands(const Value *Start, const Value *Step) {
+  Type* StartTy = Start->getType();
+  Type* StepTy = Step->getType();
+
+  if (StartTy == StepTy)
+    return StepTy->isIntegerTy();
+
+  return false;
+}
+
+//===----------------------------------------------------------------------===//
+//                            PropFF Implementation
+//===----------------------------------------------------------------------===//
+
+PropFFInst::PropFFInst(Value *Op1,
+                       Value *Op2,
+                       const Twine &NameStr,
+                       Instruction *InsertBefore)
+  : Instruction(Op1->getType(), PropFF,
+                OperandTraits<PropFFInst>::op_begin(this), 2, InsertBefore) {
+  assert(isValidOperands(Op1, Op2) && "Invalid operands for propff!");
+  Op<0>() = Op1;
+  Op<1>() = Op2;
+  setName(NameStr);
+}
+
+PropFFInst::PropFFInst(Value *Op1,
+                       Value *Op2,
+                       const Twine &NameStr,
+                       BasicBlock *InsertAtEnd)
+  : Instruction(Op1->getType(), PropFF,
+                OperandTraits<PropFFInst>::op_begin(this), 2, InsertAtEnd) {
+  assert(isValidOperands(Op1, Op2) && "Invalid operans for propff!");
+  Op<0>() = Op1;
+  Op<1>() = Op2;
+  setName(NameStr);
 }
 
 
@@ -3837,6 +3913,11 @@ ICmpInst *ICmpInst::cloneImpl() const {
   return new ICmpInst(getPredicate(), Op<0>(), Op<1>());
 }
 
+
+TestInst* TestInst::cloneImpl() const {
+  return new TestInst(getPredicate(), getOperand(0));
+}
+
 ExtractValueInst *ExtractValueInst::cloneImpl() const {
   return new ExtractValueInst(*this);
 }
@@ -3964,6 +4045,20 @@ InsertElementInst *InsertElementInst::cloneImpl() const {
 
 ShuffleVectorInst *ShuffleVectorInst::cloneImpl() const {
   return new ShuffleVectorInst(getOperand(0), getOperand(1), getOperand(2));
+}
+
+ElementCountInst *ElementCountInst::cloneImpl() const {
+  return new ElementCountInst(getType(), getOperand(0));
+}
+
+SeriesVectorInst *SeriesVectorInst::cloneImpl() const {
+  VectorType* Ty = cast<VectorType>(getType());
+  return new SeriesVectorInst(getOperand(0), getOperand(1),
+                              Ty->getElementCount());
+}
+
+PropFFInst *PropFFInst::cloneImpl() const {
+  return new PropFFInst(getOperand(0), getOperand(1));
 }
 
 PHINode *PHINode::cloneImpl() const { return new PHINode(*this); }
